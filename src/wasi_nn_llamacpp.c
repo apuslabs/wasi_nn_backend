@@ -254,12 +254,10 @@ init_backend(void **ctx)
     // llama_numa_init();
     llama_log_set(llama_log_callback_local, backend_ctx);
 
-#ifndef NDEBUG
     NN_INFO_PRINTF("llama_build_number: % d, llama_commit: %s, llama_compiler: "
                    "%s, llama_build_target: %s",
                    LLAMA_BUILD_NUMBER, LLAMA_COMMIT, LLAMA_COMPILER,
                    LLAMA_BUILD_TARGET);
-#endif
 
     *ctx = (void *)backend_ctx;
     return success;
@@ -314,11 +312,9 @@ __load_by_name_with_configuration(void *ctx, const char *filename, graph *g)
         return runtime_error;
     }
 
-#ifndef NDEBUG
     char buf[128] = { 0 };
     llama_model_desc(model, buf, 127);
     NN_INFO_PRINTF("Model desc %s", buf);
-#endif
 
     backend_ctx->model = model;
 
@@ -339,6 +335,8 @@ __attribute__((visibility("default"))) wasi_nn_error
 load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
                          const char *config, uint32_t config_len, graph *g)
 {
+    NN_DBG_PRINTF("filename: %s", filename);
+    NN_DBG_PRINTF("config: %s", config);
     struct LlamaContext *backend_ctx = (struct LlamaContext *)ctx;
 
     wasm_edge_llama_default_configuration(&backend_ctx->config);
@@ -385,11 +383,7 @@ set_input(void *ctx, graph_execution_context exec_ctx, uint32_t index,
     // tensor->data is the prompt string. ends with \0
     char *prompt_text = (char *)wasi_nn_tensor->data;
 
-#ifndef NDEBUG
-    NN_DBG_PRINTF("--------------------------------------------------");
     NN_DBG_PRINTF("prompt_text: %s", prompt_text);
-    NN_DBG_PRINTF("--------------------------------------------------");
-#endif
 
     // tokenize the prompt
     uint32_t n_token_max = llama_n_ctx(backend_ctx->ctx);
@@ -412,6 +406,9 @@ set_input(void *ctx, graph_execution_context exec_ctx, uint32_t index,
     }
 
     backend_ctx->prompt_len = n_tokens;
+
+    NN_DBG_PRINTF("n_token_max: %d", n_token_max);
+    NN_DBG_PRINTF("n_tokens: %d", n_tokens);
 
     // make sure the KV cache is big enough to hold all the prompt and generated
     // tokens
@@ -488,6 +485,9 @@ compute(void *ctx, graph_execution_context exec_ctx)
         goto fail;
     }
 
+    NN_DBG_PRINTF("n_cur: %d", n_cur);
+    NN_DBG_PRINTF("n_predict: %d", backend_ctx->config.n_predict);
+
     while (n_cur <= backend_ctx->config.n_predict) {
         // sample the next token
         float *logits =
@@ -508,14 +508,10 @@ compute(void *ctx, graph_execution_context exec_ctx)
 
         backend_ctx->generation[backend_ctx->generation_len++] = new_token_id;
 
-#ifndef NDEBUG
-        {
-            char buf[128] = { 0 };
-            llama_token_to_piece(backend_ctx->model, new_token_id, buf, 120, 0,
-                                 true);
-            printf("%d(%s),", new_token_id, buf);
-        }
-#endif
+        char buf[128] = { 0 };
+        llama_token_to_piece(backend_ctx->model, new_token_id, buf, 120, 0,
+                                true);
+        printf("%d(%s),", new_token_id, buf);
 
         // is it an end of generation?
         if (llama_token_is_eog(backend_ctx->model, new_token_id)) {
@@ -552,6 +548,7 @@ __attribute__((visibility("default"))) wasi_nn_error
 get_output(void *ctx, graph_execution_context exec_ctx, uint32_t index,
            tensor_data output_tensor, uint32_t *output_tensor_size)
 {
+    NN_DBG_PRINTF("output_tensor_size: %d", *output_tensor_size);
     struct LlamaContext *backend_ctx = (struct LlamaContext *)ctx;
 
     // Compatibility with WasmEdge
@@ -579,6 +576,8 @@ get_output(void *ctx, graph_execution_context exec_ctx, uint32_t index,
         printf("\n");
     }
 
+    NN_DBG_PRINTF("generation_len: %ld", backend_ctx->generation_len);
+
     size_t end_pos = 0;
     for (size_t i = 0; i < backend_ctx->generation_len; i++) {
         char buf[128] = { 0 };
@@ -596,7 +595,9 @@ get_output(void *ctx, graph_execution_context exec_ctx, uint32_t index,
     if (backend_ctx->config.stream_stdout) {
         printf("\n");
     }
-
+    
+    NN_DBG_PRINTF("end_pos: %ld", end_pos);
     *output_tensor_size = end_pos;
     return success;
 }
+

@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "llama.h": "c",
+        "stdint.h": "c"
+    }
+}

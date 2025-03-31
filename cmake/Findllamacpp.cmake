@@ -17,7 +17,7 @@ else()
   FetchContent_Declare(
     llamacpp
     GIT_REPOSITORY https://github.com/ggerganov/llama.cpp.git
-    GIT_TAG        b3573
+    GIT_TAG        master
     SOURCE_DIR     ${LLAMA_SOURCE_DIR}
   )
 endif()
@@ -26,4 +26,7 @@ set(LLAMA_BUILD_TESTS OFF)
 set(LLAMA_BUILD_EXAMPLES OFF)
 set(LLAMA_BUILD_SERVER OFF)
 set(GGML_CUDA ON)
+set(CMAKE_CUDA_ARCHITECTURES "86")
+
+set(CMAKE_JOB_POOLS compile_job_pool=4 PARENT_SCOPE)
 FetchContent_MakeAvailable(llamacpp)

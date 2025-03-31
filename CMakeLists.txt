@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
 project(wasi_nn_llama)
 
+set(CMAKE_JOB_POOLS compile_job_pool=16 link_job_pool=8)
+set(CMAKE_JOB_POOL_COMPILE compile_job_pool)
+set(CMAKE_JOB_POOL_LINK link_job_pool)
+
 # Basic settings
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS "")
