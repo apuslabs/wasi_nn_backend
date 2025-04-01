@@ -9,6 +9,8 @@
 #include "ggml.h"
 #include "cJSON.h"
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 // build info
 extern int LLAMA_BUILD_NUMBER;
 extern char const *LLAMA_COMMIT;
@@ -67,12 +69,100 @@ struct LlamaContext {
     struct wasi_nn_llama_config config;
 };
 
+struct EosDetector {
+    // 配置参数
+    char* eos_str;          // 要检测的EOS字符串
+    int max_eos_len;        // EOS字符串最大长度
+    
+    // 环形缓冲区状态
+    char* buffer;           // 字符缓冲区
+    int buf_size;           // 缓冲区总容量
+    int buf_pos;            // 当前写入位置
+    int total_chars;        // 累计字符数（处理环形覆盖）
+};
+
+struct EosDetector* eos_detector_create(const char* eos_str) {
+    struct EosDetector* d = malloc(sizeof(struct EosDetector));
+    
+    // 计算所需缓冲区大小（2倍EOS长度保证滑动窗口）
+    int eos_len = strlen(eos_str);
+    d->buf_size = eos_len * 2;
+    d->buffer = calloc(d->buf_size, 1);
+    
+    // 初始化配置
+    d->eos_str = strdup(eos_str);
+    d->max_eos_len = eos_len;
+    
+    // 状态初始化
+    d->buf_pos = 0;
+    d->total_chars = 0;
+    
+    return d;
+}
+
+void eos_detector_free(struct EosDetector* d) {
+    free(d->buffer);
+    free(d->eos_str);
+    free(d);
+}
+
+bool check_eos(struct EosDetector* d, const char* new_text) {
+    // 将新文本写入环形缓冲区
+    int len = strlen(new_text);
+    for (int i = 0; i < len; i++) {
+        d->buffer[d->buf_pos] = new_text[i];
+        d->buf_pos = (d->buf_pos + 1) % d->buf_size;
+        d->total_chars++;
+    }
+    
+    // 计算需要检查的长度
+    int check_len = MIN(d->max_eos_len, d->total_chars);
+    if ((size_t)check_len < strlen(d->eos_str)) {
+        return false;
+    }
+    
+    // 构建最近check_len个字符的字符串
+    char* recent = malloc(check_len + 1);
+    for (int i = 0; i < check_len; i++) {
+        int pos = (d->buf_pos - check_len + i + d->buf_size) % d->buf_size;
+        recent[i] = d->buffer[pos];
+    }
+    recent[check_len] = '\0';
+    
+    // 检查是否包含EOS（使用strstr从末尾反向查找更高效）
+    bool found = false;
+    for (int i = check_len - strlen(d->eos_str); i >= 0; i--) {
+        if (memcmp(recent + i, d->eos_str, strlen(d->eos_str)) == 0) {
+            found = true;
+            break;
+        }
+    }
+    
+    free(recent);
+    return found;
+}
+
+// 全局初始化
+struct EosDetector* g_eos_detector = NULL;
+void init_eos_detector(const char *eos_str) {
+    if (g_eos_detector) eos_detector_free(g_eos_detector);
+    g_eos_detector = eos_detector_create(eos_str); // 默认不区分大小写
+}
+
+void auto_config_eos(struct LlamaContext* ctx) {
+    llama_token eos_token = llama_token_eos(ctx->model);
+    char buf[128] = { 0 };
+    llama_token_to_piece(ctx->model, eos_token, buf, 120, 0, true);
+    NN_INFO_PRINTF("Official EOS: %s\n", buf);
+    init_eos_detector(buf);
+}
+
 static void
 wasm_edge_llama_default_configuration(struct wasi_nn_llama_config *output)
 {
-    output->enable_log = false;
+    output->enable_log = true;
     output->enable_debug_log = false;
-    output->stream_stdout = false;
+    output->stream_stdout = true;
     output->embedding = false;
     output->n_predict = 512;
     output->reverse_prompt = NULL;
@@ -91,12 +181,13 @@ wasm_edge_llama_default_configuration(struct wasi_nn_llama_config *output)
     output->ubatch_size = output->batch_size;
     output->threads = 1;
 
-    output->temp = 0.80;
+    output->temp = 0.7;
     output->topP = 0.95;
     output->repeat_penalty = 1.10;
     output->presence_penalty = 0.0;
     output->frequency_penalty = 0.0;
 }
+
 
 static void
 wasm_edge_llama_apply_configuration(const char *config_json,
@@ -284,6 +375,7 @@ deinit_backend(void *ctx)
         llama_free_model(backend_ctx->model);
 
     llama_backend_free();
+    eos_detector_free(g_eos_detector);
 
     free(backend_ctx);
     return success;
@@ -317,6 +409,8 @@ __load_by_name_with_configuration(void *ctx, const char *filename, graph *g)
     NN_INFO_PRINTF("Model desc %s", buf);
 
     backend_ctx->model = model;
+
+    auto_config_eos(backend_ctx);
 
     return success;
 }
@@ -511,10 +605,16 @@ compute(void *ctx, graph_execution_context exec_ctx)
         char buf[128] = { 0 };
         llama_token_to_piece(backend_ctx->model, new_token_id, buf, 120, 0,
                                 true);
-        printf("%d(%s),", new_token_id, buf);
+        // printf("%d(%s),", new_token_id, buf);
 
         // is it an end of generation?
         if (llama_token_is_eog(backend_ctx->model, new_token_id)) {
+            printf("\n");
+            NN_INFO_PRINTF("reach the end of generation");
+            break;
+        }
+        // is it split to a seqential tokens?
+        if (check_eos(g_eos_detector, buf)) {
             printf("\n");
             NN_INFO_PRINTF("reach the end of generation");
             break;
