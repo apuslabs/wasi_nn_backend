@@ -160,7 +160,7 @@ void auto_config_eos(struct LlamaContext* ctx) {
 static void
 wasm_edge_llama_default_configuration(struct wasi_nn_llama_config *output)
 {
-    output->enable_log = true;
+    output->enable_log = false;
     output->enable_debug_log = false;
     output->stream_stdout = true;
     output->embedding = false;
@@ -582,6 +582,10 @@ compute(void *ctx, graph_execution_context exec_ctx)
     NN_DBG_PRINTF("n_cur: %d", n_cur);
     NN_DBG_PRINTF("n_predict: %d", backend_ctx->config.n_predict);
 
+    if (backend_ctx->config.stream_stdout) {
+        printf("\n");
+    }
+
     while (n_cur <= backend_ctx->config.n_predict) {
         // sample the next token
         float *logits =
@@ -603,9 +607,11 @@ compute(void *ctx, graph_execution_context exec_ctx)
         backend_ctx->generation[backend_ctx->generation_len++] = new_token_id;
 
         char buf[128] = { 0 };
-        llama_token_to_piece(backend_ctx->model, new_token_id, buf, 120, 0,
-                                true);
-        // printf("%d(%s),", new_token_id, buf);
+        llama_token_to_piece(backend_ctx->model, new_token_id, buf, 120, 0, true);
+
+        if (backend_ctx->config.stream_stdout) {
+            printf("%s", buf);
+        }
 
         // is it an end of generation?
         if (llama_token_is_eog(backend_ctx->model, new_token_id)) {
@@ -662,18 +668,9 @@ get_output(void *ctx, graph_execution_context exec_ctx, uint32_t index,
         char output_metadata[128] = { 0 };
         llama_build_output_metadata(backend_ctx, output_metadata, 127);
 
-        if (backend_ctx->config.stream_stdout) {
-            printf("%s\n", output_metadata);
-        }
-
         memcpy(output_tensor, output_metadata, strlen(output_metadata));
         *output_tensor_size = strlen(output_metadata);
         return success;
-    }
-
-    // token -> piece -> output_tensor
-    if (backend_ctx->config.stream_stdout) {
-        printf("\n");
     }
 
     NN_DBG_PRINTF("generation_len: %ld", backend_ctx->generation_len);
@@ -684,16 +681,8 @@ get_output(void *ctx, graph_execution_context exec_ctx, uint32_t index,
         llama_token_to_piece(backend_ctx->model, backend_ctx->generation[i],
                              buf, 120, 0, true);
 
-        if (backend_ctx->config.stream_stdout) {
-            printf("%s", buf);
-        }
-
         memcpy(output_tensor + end_pos, buf, strlen(buf));
         end_pos += strlen(buf);
-    }
-
-    if (backend_ctx->config.stream_stdout) {
-        printf("\n");
     }
     
     NN_DBG_PRINTF("end_pos: %ld", end_pos);
