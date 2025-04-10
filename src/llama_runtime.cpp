@@ -57,11 +57,11 @@ LLAMA_RUNTIME_API LlamaHandle initialize_llama_runtime(
         state->n_ctx = n_ctx_param;
 
         // Set log callback (can be made configurable)
-        llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
-            if (level >= GGML_LOG_LEVEL_ERROR) { // Only log errors
-                fprintf(stderr, "%s", text);
-            }
-        }, nullptr);
+        // llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
+        //     if (level >= GGML_LOG_LEVEL_ERROR) { // Only log errors
+        //         fprintf(stderr, "%s", text);
+        //     }
+        // }, nullptr);
 
         // Load backends (consider if this should be done once globally)
         ggml_backend_load_all();
@@ -137,82 +137,87 @@ LLAMA_RUNTIME_API bool run_llama_inference(
         copy_string_safe(error_msg_buffer, error_msg_buffer_size, "Result buffer is invalid or has zero size.");
         return false;
     }
+    const char * tmpl = llama_model_chat_template(state->model, /* name */ nullptr);
+    std::vector<llama_chat_message> messages;
+    std::vector<char> formatted(llama_n_ctx(state->ctx));
+    int prev_len = 0;
+    // add the user input to the message list and format it
+    messages.push_back({"user", strdup(prompt_cstr)});
+    int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+    if (new_len > (int)formatted.size()) {
+        formatted.resize(new_len);
+        new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+    }
+    if (new_len < 0) {
+        fprintf(stderr, "failed to apply the chat template\n");
+        return 1;
+    }
 
-    std::string prompt(prompt_cstr);
-    std::string response = "";
+    // remove previous messages to obtain the prompt to generate the response
+    std::string prompt(formatted.begin() + prev_len, formatted.begin() + new_len);
+    
+    
+    printf("Prompt: %s\n", prompt.c_str());
+    
     result_buffer[0] = '\0'; // Clear result buffer initially
 
     try {
-        // --- Reset state if needed (uncomment if each call should be independent) ---
-        // llama_sampler_reset(state->smpl);
-        // llama_kv_cache_clear(state->ctx);
-
-        const bool is_first = true; // Assume start of new sequence
-
-        // Tokenize prompt
-        int n_prompt_tokens_estimated = -llama_tokenize(state->vocab, prompt.c_str(), prompt.size(), nullptr, 0, is_first, true);
-        if (n_prompt_tokens_estimated >= state->n_ctx) {
-            throw std::runtime_error("Prompt is too long for the context size.");
-        }
-        std::vector<llama_token> prompt_tokens(n_prompt_tokens_estimated);
-        int n_prompt_tokens = llama_tokenize(state->vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), is_first, true);
-        if (n_prompt_tokens < 0) {
-            throw std::runtime_error("Failed to tokenize the prompt.");
-        }
-        prompt_tokens.resize(n_prompt_tokens);
-
-        // Prepare batch and decode/sample loop
-        llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
-        llama_token new_token_id;
-        int n_decoded = 0;
-
-        // Decode initial prompt
-        if (llama_kv_self_used_cells(state->ctx) + batch.n_tokens > state->n_ctx) {
-             throw std::runtime_error("Context size exceeded by initial prompt (unexpected).");
-        }
-        if (llama_decode(state->ctx, batch)) {
-            throw std::runtime_error("Failed to decode initial prompt.");
-        }
-        n_decoded += batch.n_tokens;
-
-        // Generation loop
-        size_t current_response_len = 0;
-        while (true) {
-            new_token_id = llama_sampler_sample(state->smpl, state->ctx, -1);
-
-            if (llama_vocab_is_eog(state->vocab, new_token_id)) {
-                break; // End of generation
+        auto generate = [&](const std::string & prompt) {
+            std::string response;
+    
+            const bool is_first = llama_kv_self_used_cells(state->ctx) == 0;
+    
+            // tokenize the prompt
+            const int n_prompt_tokens = -llama_tokenize(state->vocab, prompt.c_str(), prompt.size(), NULL, 0, is_first, true);
+            std::vector<llama_token> prompt_tokens(n_prompt_tokens);
+            if (llama_tokenize(state->vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), is_first, true) < 0) {
+                GGML_ABORT("failed to tokenize the prompt\n");
             }
-
-            std::string piece = token_to_piece_internal(state->vocab, new_token_id);
-            if (current_response_len + piece.length() < result_buffer_size) {
-                 memcpy(result_buffer + current_response_len, piece.c_str(), piece.length());
-                 current_response_len += piece.length();
-                 result_buffer[current_response_len] = '\0'; // Keep null-terminated
-            } else {
-                 fprintf(stderr, "\nWarning: Result buffer overflow during generation.\n");
-                 copy_string_safe(error_msg_buffer, error_msg_buffer_size, "Result buffer overflow.");
-                 // Return true as we got partial results, but indicate overflow via error msg
-                 return true;
+    
+            // prepare a batch for the prompt
+            llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+            llama_token new_token_id;
+            while (true) {
+                // check if we have enough space in the context to evaluate this batch
+                int n_ctx = llama_n_ctx(state->ctx);
+                int n_ctx_used = llama_kv_self_used_cells(state->ctx);
+                if (n_ctx_used + batch.n_tokens > n_ctx) {
+                    printf("\033[0m\n");
+                    fprintf(stderr, "context size exceeded\n");
+                    exit(0);
+                }
+    
+                if (llama_decode(state->ctx, batch)) {
+                    GGML_ABORT("failed to decode\n");
+                }
+    
+                // sample the next token
+                new_token_id = llama_sampler_sample(state->smpl, state->ctx, -1);
+    
+                // is it an end of generation?
+                if (llama_vocab_is_eog(state->vocab, new_token_id)) {
+                    break;
+                }
+    
+                // convert the token to a string, print it and add it to the response
+                char buf[256];
+                int n = llama_token_to_piece(state->vocab, new_token_id, buf, sizeof(buf), 0, true);
+                if (n < 0) {
+                    GGML_ABORT("failed to convert token to piece\n");
+                }
+                std::string piece(buf, n);
+                printf("%s", piece.c_str());
+                fflush(stdout);
+                response += piece;
+    
+                // prepare the next batch with the sampled token
+                batch = llama_batch_get_one(&new_token_id, 1);
             }
-
-
-            batch = llama_batch_get_one(&new_token_id, 1);
-
-            if (llama_kv_self_used_cells(state->ctx) + batch.n_tokens > state->n_ctx) {
-                fprintf(stderr, "\nWarning: Context size exceeded during generation.\n");
-                // Return true as we got partial results
-                return true;
-            }
-
-            if (llama_decode(state->ctx, batch)) {
-                fprintf(stderr, "\nWarning: Failed to decode during generation.\n");
-                 // Return true as we got partial results
-                return true;
-            }
-            n_decoded++;
-        }
-
+    
+            return response;
+        };
+        std::string res = generate(prompt);
+        copy_string_safe(result_buffer, result_buffer_size, res);
         return true; // Success
 
     } catch (const std::exception& e) {

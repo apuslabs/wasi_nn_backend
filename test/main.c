@@ -88,6 +88,8 @@ int main() {
 
     // --- 4. Call Inference Function ---
     const char* prompt = "Translate the following English text to French: 'Hello, world!'";
+
+  
     printf("\nRunning inference with prompt: \"%s\"\n", prompt);
     result_buffer[0] = '\0'; // Clear result buffer
     error_buffer[0] = '\0';  // Clear error buffer
