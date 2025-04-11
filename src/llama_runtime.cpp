@@ -88,6 +88,7 @@ LLAMA_RUNTIME_API LlamaHandle initialize_llama_runtime(
 
         // Initialize sampler (make parameters configurable if needed)
         auto sparams = llama_sampler_chain_default_params();
+        sparams.penalty_repeat = 1.5f;
         llama_sampler * smpl = llama_sampler_chain_init(sparams);
         llama_sampler_chain_add(smpl, llama_sampler_init_dist(0));
         state->smpl = smpl;
