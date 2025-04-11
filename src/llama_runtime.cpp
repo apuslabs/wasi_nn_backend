@@ -79,13 +79,18 @@ LLAMA_RUNTIME_API LlamaHandle initialize_llama_runtime(
         llama_context_params ctx_params = llama_context_default_params();
         ctx_params.n_ctx = state->n_ctx;
         ctx_params.n_batch = state->n_ctx; // Adjust batch size if needed
+        ctx_params.n_threads = 8;
+        ctx_params.n_threads_batch = 8;
         state->ctx = llama_init_from_model(state->model, ctx_params);
         if (!state->ctx) {
             throw std::runtime_error("Failed to create the llama_context");
         }
 
         // Initialize sampler (make parameters configurable if needed)
-        state->smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+        auto sparams = llama_sampler_chain_default_params();
+        llama_sampler * smpl = llama_sampler_chain_init(sparams);
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(0));
+        state->smpl = smpl;
          if (!state->smpl) {
             throw std::runtime_error("Failed to initialize sampler chain");
         }
