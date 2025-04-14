@@ -1,22 +1,39 @@
-#include "llama_runtime.h" // Include the public C header
-#include "llama.h"         // Include the llama.cpp header
-
+#include "llama_runtime.h" 
+#include "llama.h"         
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 #include <stdexcept>
-#include <sstream> // For formatting error messages
+#include <sstream> 
+#include "cJSON.h"
 
-// --- Internal State Structure ---
-// This struct is hidden from the user of the shared library.
+struct llama_config {
+
+    bool stream_stdout;
+    bool enable_debug_log;
+
+    // Model parameters (need to reload the model if updated):
+    int32_t n_gpu_layers = 99;
+    int32_t main_gpu;
+
+    // Context parameters (used by the llama context):
+    int32_t n_predict             =  1024; // new tokens to predict
+    int32_t n_ctx                 =  0; // context size
+    int32_t n_batch               =  1024; // logical batch size for prompt processing (must be >=32 to use BLAS)
+    int32_t  n_threads; 
+    int32_t  n_threads_batch;
+    // Sampling parameters (used by the llama sampling context).
+    float penalty_repeat         = 1.5f;
+};
+
 
 struct LlamaStateInternal {
     llama_model* model = nullptr;
     llama_context* ctx = nullptr;
     llama_sampler* smpl = nullptr;
     const llama_vocab* vocab = nullptr;
-    int n_ctx = 0;
+    struct llama_config config;
 };
 
 // --- Helper Function: Copy string safely ---
@@ -27,18 +44,102 @@ static void copy_string_safe(char* dest, size_t dest_size, const std::string& sr
     dest[dest_size - 1] = '\0'; // Ensure null termination
 }
 
-// --- Helper Function: Token to Piece (Internal) ---
 
-static std::string token_to_piece_internal(const llama_vocab * vocab, llama_token token) {
-    char buf[256];
-    int n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, true);
-    if (n < 0) {
-        // In a real library, better error propagation might be needed
-        // 在实际库中可能需要更好的错误传播
-        fprintf(stderr, "Warning: Failed to convert token %d to piece.\n", token);
-        return "";
+
+// --- Apply configs 
+static void
+llama_apply_configuration(const char *config_json,
+                                    struct llama_config *output)
+{
+    cJSON *root = cJSON_Parse(config_json);
+    if (root == NULL) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            printf("Error before: %s\n", error_ptr);
+        }
+        else {
+            printf("Failed to parse JSON");
+        }
+        return;
     }
-    return std::string(buf, n);
+
+    cJSON *item = NULL;
+    printf("parse configs %s \n",config_json);
+    item = cJSON_GetObjectItem(root, "enable_debug_log");
+    if (item != NULL) {
+        output->enable_debug_log = cJSON_IsTrue(item);
+        printf("apply enable-debug-log %d \n", output->enable_debug_log);
+        if(!output->enable_debug_log)
+        {
+            llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
+                if (level >= GGML_LOG_LEVEL_ERROR) { // Only log errors
+                    fprintf(stderr, "%s", text);
+                }
+            }, nullptr);
+        }
+    }
+
+    item = cJSON_GetObjectItem(root, "stream-stdout");
+    if (item != NULL) {
+        output->stream_stdout = cJSON_IsTrue(item);
+        printf("apply stream-stdout %d \n", output->stream_stdout);
+    }
+
+    item = cJSON_GetObjectItem(root, "n-gpu-layers");
+    if (item != NULL) {
+        output->n_gpu_layers = (int)cJSON_GetNumberValue(item);
+        printf("apply n_gpu_layers %d \n", output->n_gpu_layers);
+    }
+
+    item = cJSON_GetObjectItem(root, "main-gpu");
+    if (item != NULL) {
+        output->main_gpu = (int32_t)cJSON_GetNumberValue(item);
+        printf("apply main_gpu %d\n", output->main_gpu);
+    }
+
+    item = cJSON_GetObjectItem(root, "n-predict");
+    if (item != NULL) {
+        output->n_predict = (int32_t)cJSON_GetNumberValue(item);
+        printf("apply n-predict %d \n", output->n_predict);
+    }
+
+
+
+    item = cJSON_GetObjectItem(root, "n_ctx");
+    if (item != NULL) {
+        output->n_ctx = (int32_t)cJSON_GetNumberValue(item);
+        printf("apply n_ctx %d \n", output->n_ctx);
+    }
+
+    item = cJSON_GetObjectItem(root, "n_batch");
+    if (item != NULL) {
+        output->n_batch = (int32_t)cJSON_GetNumberValue(item);
+        printf("apply n_ctx %d \n", output->n_batch);
+    }
+    item = cJSON_GetObjectItem(root, "n_threads");
+    if (item != NULL) {
+        output->n_threads = (int32_t)cJSON_GetNumberValue(item);
+        printf("apply n_ctx %d \n", output->n_threads);
+    }
+    item = cJSON_GetObjectItem(root, "n_threads_batch");
+    if (item != NULL) {
+        output->n_threads_batch = (int32_t)cJSON_GetNumberValue(item);
+        printf("apply n_ctx %d \n", output->n_threads_batch);
+    }
+
+
+
+    item = cJSON_GetObjectItem(root, "penalty-repeat");
+    if (item != NULL) {
+        output->penalty_repeat = (float)cJSON_GetNumberValue(item);
+        printf("apply penalty_repeat %f \n", output->penalty_repeat);
+    }
+
+
+
+    // more ...
+
+    cJSON_Delete(root);
 }
 
 
@@ -46,29 +147,20 @@ static std::string token_to_piece_internal(const llama_vocab * vocab, llama_toke
 
 LLAMA_RUNTIME_API LlamaHandle initialize_llama_runtime(
     const char* model_path,
-    int n_gpu_layers,
-    int n_ctx_param,
+    const char* config_json,
     char* error_msg_buffer,
     size_t error_msg_buffer_size
 ) {
     LlamaStateInternal* state = nullptr;
     try {
         state = new LlamaStateInternal(); // Allocate internal state
-        state->n_ctx = n_ctx_param;
-
-        // Set log callback (can be made configurable)
-        // llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
-        //     if (level >= GGML_LOG_LEVEL_ERROR) { // Only log errors
-        //         fprintf(stderr, "%s", text);
-        //     }
-        // }, nullptr);
-
-        // Load backends (consider if this should be done once globally)
+        llama_apply_configuration(config_json, &state->config);
+        
         ggml_backend_load_all();
 
         // Load model
         llama_model_params model_params = llama_model_default_params();
-        model_params.n_gpu_layers = n_gpu_layers;
+        model_params.n_gpu_layers = state->config.n_gpu_layers;
         state->model = llama_model_load_from_file(model_path, model_params);
         if (!state->model) {
             throw std::runtime_error("Unable to load model '" + std::string(model_path) + "'");
@@ -77,10 +169,11 @@ LLAMA_RUNTIME_API LlamaHandle initialize_llama_runtime(
 
         // Create context
         llama_context_params ctx_params = llama_context_default_params();
-        ctx_params.n_ctx = state->n_ctx;
-        ctx_params.n_batch = state->n_ctx; // Adjust batch size if needed
+        ctx_params.n_ctx = state->config.n_ctx;
+        ctx_params.n_batch = state->config.n_ctx; // Adjust batch size if needed
         ctx_params.n_threads = 8;
         ctx_params.n_threads_batch = 8;
+        
         state->ctx = llama_init_from_model(state->model, ctx_params);
         if (!state->ctx) {
             throw std::runtime_error("Failed to create the llama_context");
@@ -88,18 +181,21 @@ LLAMA_RUNTIME_API LlamaHandle initialize_llama_runtime(
 
         // Initialize sampler (make parameters configurable if needed)
         auto sparams = llama_sampler_chain_default_params();
-        sparams.penalty_repeat = 1.5f;
         llama_sampler * smpl = llama_sampler_chain_init(sparams);
+
+       
+        llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
+        llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
         llama_sampler_chain_add(smpl, llama_sampler_init_dist(0));
+        llama_sampler_chain_add(smpl, llama_sampler_init_penalties(64,1.5,0.0,0.0));
+        
+
+
         state->smpl = smpl;
-         if (!state->smpl) {
+
+        if (!state->smpl) {
             throw std::runtime_error("Failed to initialize sampler chain");
         }
-        llama_sampler_chain_add(state->smpl, llama_sampler_init_min_p(0.05f, 1));
-        llama_sampler_chain_add(state->smpl, llama_sampler_init_temp(0.8f));
-        llama_sampler_chain_add(state->smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-
-        printf("LLaMA runtime initialized successfully.\n");
         return static_cast<LlamaHandle>(state); // Return opaque handle
 
     } catch (const std::exception& e) {
@@ -116,7 +212,7 @@ LLAMA_RUNTIME_API LlamaHandle initialize_llama_runtime(
     }
 }
 
-LLAMA_RUNTIME_API bool run_llama_inference(
+LLAMA_RUNTIME_API bool run_inference(
     LlamaHandle handle,
     const char* prompt_cstr,
     char* result_buffer,

@@ -27,11 +27,14 @@ int main() {
     char result_buffer[RESULT_BUFFER_SIZE];
     char error_buffer[ERROR_BUFFER_SIZE];
 
+    const char* config = "{\"n_gpu_layers\":98,\"n_ctx\":2048,\"stream-stdout\":true,\"enable_debug_log\":false}";
+
+
     // --- Function Pointers ---
     // Declare pointers for the functions we want to load from the SO
-    LlamaHandle (*initialize_func)(const char*, int, int, char*, size_t);
-    bool (*inference_func)(LlamaHandle, const char*, char*, size_t, char*, size_t);
-    void (*cleanup_func)(LlamaHandle);
+    LlamaHandle (*initialize_llama_runtime)(const char*, const char*, char*, size_t);
+    bool (*run_inference)(LlamaHandle, const char*, char*, size_t, char*, size_t);
+    void (*cleanup_llama_runtime)(LlamaHandle);
 
     printf("Attempting to load library: %s\n", LIB_PATH);
 
@@ -49,7 +52,7 @@ int main() {
     dlerror();
 
     // --- 2. Get Pointers to Functions using dlsym ---
-    *(void **) (&initialize_func) = dlsym(lib_handle, "initialize_llama_runtime");
+    *(void **) (&initialize_llama_runtime) = dlsym(lib_handle, "initialize_llama_runtime");
     char *dlsym_error = dlerror();
     if (dlsym_error) {
         fprintf(stderr, "Error getting symbol 'initialize_llama_runtime': %s\n", dlsym_error);
@@ -57,15 +60,15 @@ int main() {
         return 1;
     }
 
-    *(void **) (&inference_func) = dlsym(lib_handle, "run_llama_inference");
+    *(void **) (&run_inference) = dlsym(lib_handle, "run_inference");
     dlsym_error = dlerror();
     if (dlsym_error) {
-        fprintf(stderr, "Error getting symbol 'run_llama_inference': %s\n", dlsym_error);
+        fprintf(stderr, "Error getting symbol 'run_inference': %s\n", dlsym_error);
         dlclose(lib_handle);
         return 1;
     }
 
-    *(void **) (&cleanup_func) = dlsym(lib_handle, "cleanup_llama_runtime");
+    *(void **) (&cleanup_llama_runtime) = dlsym(lib_handle, "cleanup_llama_runtime");
     dlsym_error = dlerror();
     if (dlsym_error) {
         fprintf(stderr, "Error getting symbol 'cleanup_llama_runtime': %s\n", dlsym_error);
@@ -77,7 +80,7 @@ int main() {
     // --- 3. Call Initialization Function ---
     printf("Initializing LLaMA runtime (Model: %s)...\n", MODEL_PATH);
     error_buffer[0] = '\0'; // Clear error buffer
-    llama_handle = initialize_func(MODEL_PATH, N_GPU_LAYERS, N_CTX, error_buffer, ERROR_BUFFER_SIZE);
+    llama_handle = initialize_llama_runtime(MODEL_PATH, config, error_buffer, ERROR_BUFFER_SIZE);
 
     if (!llama_handle) {
         fprintf(stderr, "Initialization failed: %s\n", error_buffer[0] ? error_buffer : "Unknown error");
@@ -94,7 +97,7 @@ int main() {
     result_buffer[0] = '\0'; // Clear result buffer
     error_buffer[0] = '\0';  // Clear error buffer
 
-    bool success = inference_func(llama_handle, prompt, result_buffer, RESULT_BUFFER_SIZE, error_buffer, ERROR_BUFFER_SIZE);
+    bool success = run_inference(llama_handle, prompt, result_buffer, RESULT_BUFFER_SIZE, error_buffer, ERROR_BUFFER_SIZE);
 
     if (success) {
         printf("Inference successful.\n");
@@ -108,7 +111,7 @@ int main() {
 
     // --- 5. Call Cleanup Function ---
     printf("\nCleaning up LLaMA runtime...\n");
-    cleanup_func(llama_handle);
+    cleanup_llama_runtime(llama_handle);
     printf("Cleanup complete.\n");
 
     // --- 6. Unload the Library ---

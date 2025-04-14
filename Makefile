@@ -14,7 +14,7 @@ SRCS = test/main.c
 OBJS = $(SRCS:.c=.o)
 
 # Target executable
-TARGET = test_llama_runtime
+TARGET = main
 
 # Default target
 all: $(TARGET)
