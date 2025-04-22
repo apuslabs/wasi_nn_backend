@@ -16,7 +16,6 @@ target_include_directories(wasi_nn_llamacpp
 target_link_libraries(wasi_nn_llamacpp
     PUBLIC
         cjson
-        common
         ggml
         llama
 )
