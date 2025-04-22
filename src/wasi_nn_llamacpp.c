@@ -11,12 +11,6 @@
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-// build info
-extern int LLAMA_BUILD_NUMBER;
-extern char const *LLAMA_COMMIT;
-extern char const *LLAMA_COMPILER;
-extern char const *LLAMA_BUILD_TARGET;
-
 // compatable with WasmEdge
 // https://github.com/second-state/WasmEdge-WASINN-examples/blob/master/wasmedge-ggml/README.md#parameters
 // https://github.com/WasmEdge/WasmEdge/blob/master/plugins/wasi_nn/ggml.cpp
@@ -325,11 +319,8 @@ llama_build_output_metadata(const struct LlamaContext *backend_ctx,
                             char *output_buf, size_t output_buf_size)
 {
     snprintf(output_buf, output_buf_size,
-             "{\"input_tokens\":%ld, \"output_tokens\":%ld, "
-             "\"llama_build_number\":%d,"
-             "\"llama_commit\":\"%s\"}",
-             backend_ctx->prompt_len, backend_ctx->generation_len,
-             LLAMA_BUILD_NUMBER, LLAMA_COMMIT);
+             "{\"input_tokens\":%ld, \"output_tokens\":%ld",
+             backend_ctx->prompt_len, backend_ctx->generation_len);
 }
 
 __attribute__((visibility("default"))) wasi_nn_error
@@ -344,11 +335,6 @@ init_backend(void **ctx)
     llama_backend_init();
     // llama_numa_init();
     llama_log_set(llama_log_callback_local, backend_ctx);
-
-    NN_INFO_PRINTF("llama_build_number: % d, llama_commit: %s, llama_compiler: "
-                   "%s, llama_build_target: %s",
-                   LLAMA_BUILD_NUMBER, LLAMA_COMMIT, LLAMA_COMPILER,
-                   LLAMA_BUILD_TARGET);
 
     *ctx = (void *)backend_ctx;
     return success;
