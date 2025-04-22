@@ -17,7 +17,7 @@ else()
   FetchContent_Declare(
     llamacpp
     GIT_REPOSITORY https://github.com/ggerganov/llama.cpp.git
-    GIT_TAG        master
+    GIT_TAG        b3573
     SOURCE_DIR     ${LLAMA_SOURCE_DIR}
   )
 endif()
