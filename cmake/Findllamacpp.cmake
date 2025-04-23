@@ -3,7 +3,7 @@
 
 include(FetchContent)
 
-#set(LLAMA_SOURCE_DIR "${WAMR_ROOT_DIR}/core/deps/llama.cpp")
+##TODO: set stable branch
 
 set(LLAMA_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/llama.cpp")
 if(EXISTS ${LLAMA_SOURCE_DIR})
@@ -25,8 +25,11 @@ endif()
 set(LLAMA_BUILD_TESTS OFF)
 set(LLAMA_BUILD_EXAMPLES OFF)
 set(LLAMA_BUILD_SERVER OFF)
+set(LLAMA_BUILD_COMMON ON)
+set(LLAMA_CURL OFF)
 set(GGML_CUDA ON)
 set(CMAKE_CUDA_ARCHITECTURES "86")
 
 set(CMAKE_JOB_POOLS compile_job_pool=4 PARENT_SCOPE)
 FetchContent_MakeAvailable(llamacpp)
+message(STATUS "llama.cpp available. Targets: llama, ggml common")

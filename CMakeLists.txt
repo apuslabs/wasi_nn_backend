@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(wasi_nn_llama)
+project(wasi_nn_backend)
 
 set(CMAKE_JOB_POOLS compile_job_pool=16 link_job_pool=8)
 set(CMAKE_JOB_POOL_COMPILE compile_job_pool)
@@ -28,7 +28,7 @@ if (NOT DEFINED WAMR_BUILD_TARGET)
   endif ()
 endif ()
 
-
+## TODO
 if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif ()

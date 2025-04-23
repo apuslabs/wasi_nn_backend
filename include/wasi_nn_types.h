@@ -158,7 +158,7 @@ typedef wasi_nn_error (*GET_OUTPUT)(void *, graph_execution_context, uint32_t,
 /* wasi-nn general APIs */
 typedef wasi_nn_error (*BACKEND_INITIALIZE)(void **);
 typedef wasi_nn_error (*BACKEND_DEINITIALIZE)(void *);
-
+typedef wasi_nn_error (*RUN_INFERENCE)(void *, graph_execution_context , uint32_t,tensor * , tensor_data , uint32_t *);
 typedef struct {
     LOAD load;
     LOAD_BY_NAME load_by_name;
@@ -169,6 +169,7 @@ typedef struct {
     GET_OUTPUT get_output;
     BACKEND_INITIALIZE init;
     BACKEND_DEINITIALIZE deinit;
+    RUN_INFERENCE run_inference;
 } api_function;
 
 void

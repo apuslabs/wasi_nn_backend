@@ -2,18 +2,22 @@
 find_package(cjson REQUIRED)
 find_package(llamacpp REQUIRED)
 
-add_library(wasi_nn_llamacpp SHARED
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/wasi_nn_llamacpp.c
+add_library(
+    wasi_nn_backend
+    SHARED
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/wasi_nn_llama.cpp
 )
 
-target_include_directories(wasi_nn_llamacpp
+target_include_directories(
+    wasi_nn_backend
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${cjson_SOURCE_DIR}
 )
 
 # Link libraries
-target_link_libraries(wasi_nn_llamacpp
+target_link_libraries(
+    wasi_nn_backend
     PUBLIC
         cjson
         common
@@ -22,7 +26,7 @@ target_link_libraries(wasi_nn_llamacpp
 )
 
 # Install
-install(TARGETS wasi_nn_llamacpp
+install(TARGETS wasi_nn_backend
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
