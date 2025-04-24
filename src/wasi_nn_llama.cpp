@@ -2,20 +2,12 @@
  * Copyright (C) 2019 Intel Corporation.  All rights reserved.
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
-#include "wasi_nn_types.h"
+#include "wasi_nn_llama.h"
 #include "utils/logger.h"
-#include "stdlib.h"
-#include "llama.h"
-//#include "ggml.h"
-#include "cJSON.h"
-#include <vector>
+#include "llama.h" 
 #include <string>
-#include <sstream> 
-// build info
-extern int LLAMA_BUILD_NUMBER;
-extern char const *LLAMA_COMMIT;
-extern char const *LLAMA_COMPILER;
-extern char const *LLAMA_BUILD_TARGET;
+#include <vector>
+#include "cJSON.h"
 
 struct wasi_nn_llama_config {
     // Backend(plugin in WasmEdge) parameters:
@@ -72,8 +64,8 @@ struct LlamaContext {
 static void
 wasm_edge_llama_default_configuration(struct wasi_nn_llama_config *output)
 {
-    output->enable_log = false;
-    output->enable_debug_log = false;
+    output->enable_log = true;
+    output->enable_debug_log = true;
     output->stream_stdout = true;
     output->embedding = false;
     output->n_predict = 512;
@@ -119,19 +111,19 @@ wasm_edge_llama_apply_configuration(const char *config_json,
 
     cJSON *item = NULL;
 
-    item = cJSON_GetObjectItem(root, "enable-log");
+    item = cJSON_GetObjectItem(root, "enable_log");
     if (item != NULL) {
         output->enable_log = cJSON_IsTrue(item);
         NN_DBG_PRINTF("apply enable-log %d", output->enable_log);
     }
 
-    item = cJSON_GetObjectItem(root, "enable-debug-log");
+    item = cJSON_GetObjectItem(root, "enable_debug_log");
     if (item != NULL) {
         output->enable_debug_log = cJSON_IsTrue(item);
         NN_DBG_PRINTF("apply enable-debug-log %d", output->enable_debug_log);
     }
 
-    item = cJSON_GetObjectItem(root, "stream-stdout");
+    item = cJSON_GetObjectItem(root, "stream_stdout");
     if (item != NULL) {
         output->stream_stdout = cJSON_IsTrue(item);
         NN_DBG_PRINTF("apply stream-stdout %d", output->stream_stdout);
@@ -143,24 +135,33 @@ wasm_edge_llama_apply_configuration(const char *config_json,
         NN_DBG_PRINTF("apply embedding %d", output->embedding);
     }
 
-    item = cJSON_GetObjectItem(root, "n-predict");
+    item = cJSON_GetObjectItem(root, "n_predict");
     if (item != NULL) {
         output->n_predict = (int32_t)cJSON_GetNumberValue(item);
         NN_DBG_PRINTF("apply n-predict %d", output->n_predict);
     }
 
-    item = cJSON_GetObjectItem(root, "n-gpu-layers");
+    item = cJSON_GetObjectItem(root, "n_gpu_layers");
     if (item != NULL) {
         output->n_gpu_layers = (int32_t)cJSON_GetNumberValue(item);
         NN_DBG_PRINTF("apply n_gpu_layers %d", output->n_gpu_layers);
     }
 
-    item = cJSON_GetObjectItem(root, "ctx-size");
+    item = cJSON_GetObjectItem(root, "ctx_size");
     if (item != NULL) {
         output->ctx_size = (uint32_t)cJSON_GetNumberValue(item);
         NN_DBG_PRINTF("apply ctx-size %d", output->ctx_size);
     }
-
+    item = cJSON_GetObjectItem(root, "batch_size");
+    if (item != NULL) {
+        output->batch_size = (uint32_t)cJSON_GetNumberValue(item);
+        NN_DBG_PRINTF("apply batch_size %d", output->batch_size);
+    }
+    item = cJSON_GetObjectItem(root, "threads");
+    if (item != NULL) {
+        output->threads = (uint32_t)cJSON_GetNumberValue(item);
+        NN_DBG_PRINTF("apply batch_size %d", output->threads);
+    }
     // more ...
 
     cJSON_Delete(root);
@@ -205,7 +206,9 @@ llama_context_params_from_wasi_nn_llama_config(
 
     // TODO: support more
     result.n_ctx = config->ctx_size;
-    // result.embeddings = config->embedding;
+    result.n_batch = config->batch_size;
+    result.n_threads = 8;
+    result.n_threads_batch = 8;
 
     return result;
 }
@@ -229,7 +232,7 @@ llama_log_callback_local(enum ggml_log_level level, const char *text,
 }
 
 __attribute__((visibility("default"))) wasi_nn_error
-init_backend(void **ctx)
+init_backend(void **ctx) 
 {
     struct LlamaContext *backend_ctx = new LlamaContext();
     if (!backend_ctx) {
@@ -240,11 +243,8 @@ init_backend(void **ctx)
 
     llama_log_set(llama_log_callback_local, backend_ctx);
 
-    NN_INFO_PRINTF("llama_build_number: % d, llama_commit: %s, llama_compiler: "
-                   "%s, llama_build_target: %s",
-                   LLAMA_BUILD_NUMBER, LLAMA_COMMIT, LLAMA_COMPILER,
-                   LLAMA_BUILD_TARGET);
 
+    NN_INFO_PRINTF("llama backend init success");
     *ctx = (void *)backend_ctx;
     return success;
 }
@@ -258,10 +258,10 @@ deinit_backend(void *ctx)
         return invalid_argument;
 
     if (backend_ctx->generation)
-        free(backend_ctx->generation);
+        delete backend_ctx->generation;
 
     if (backend_ctx->prompt)
-        free(backend_ctx->prompt);
+        delete backend_ctx->prompt;
 
     if (backend_ctx->ctx)
     {
@@ -283,7 +283,7 @@ deinit_backend(void *ctx)
 
     // ggml_backend_free();
 
-    free(backend_ctx);
+    delete backend_ctx;
     return success;
 }
 
@@ -294,7 +294,7 @@ load(void *ctx, graph_builder_array *builder, graph_encoding encoding,
     return unsupported_operation;
 }
 
-static wasi_nn_error
+__attribute__((visibility("default"))) wasi_nn_error
 __load_by_name_with_configuration(void *ctx, const char *filename, graph *g)
 {
     struct LlamaContext *backend_ctx = (struct LlamaContext *)ctx;
@@ -337,7 +337,7 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
     wasm_edge_llama_default_configuration(&backend_ctx->config);
 
     if (config != NULL) {
-        // parse wasmedge config
+        // parse  config
         wasm_edge_llama_apply_configuration(config, &backend_ctx->config);
     }
     else {

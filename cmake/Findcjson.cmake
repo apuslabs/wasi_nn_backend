@@ -20,6 +20,10 @@ else()
   )
 endif()
 
-set(ENABLE_CJSON_TEST OFF CACHE INTERNAL "Turn off tests")
-set(ENABLE_CJSON_UNINSTALL OFF CACHE INTERNAL "Turn off uninstall to avoid targets conflict")
+set(ENABLE_CJSON_TEST OFF CACHE BOOL "Disable cJSON tests" FORCE)
+set(ENABLE_CJSON_UNINSTALL OFF CACHE BOOL "Disable cJSON uninstall target" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build cJSON as a static library" FORCE) # Build static
+
 FetchContent_MakeAvailable(cjson)
+
+message(STATUS "cJSON available as target 'cjson'")

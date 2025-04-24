@@ -8,10 +8,11 @@ add_library(
         ${CMAKE_CURRENT_SOURCE_DIR}/src/wasi_nn_llama.cpp
 )
 
+
 target_include_directories(
     wasi_nn_backend
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         ${cjson_SOURCE_DIR}
 )
 
@@ -28,5 +29,4 @@ target_link_libraries(
 # Install
 install(TARGETS wasi_nn_backend
     LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
 )
