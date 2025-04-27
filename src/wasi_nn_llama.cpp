@@ -253,36 +253,34 @@ __attribute__((visibility("default"))) wasi_nn_error
 deinit_backend(void *ctx)
 {
     struct LlamaContext *backend_ctx = (struct LlamaContext *)ctx;
-
     if (!backend_ctx)
         return invalid_argument;
-
     if (backend_ctx->generation)
+    {
         delete backend_ctx->generation;
-
+        backend_ctx->generation = nullptr;
+    }
     if (backend_ctx->prompt)
+    {
         delete backend_ctx->prompt;
-
+        backend_ctx->prompt = nullptr;
+    }
+    if(backend_ctx->smpl)
+    {
+        llama_sampler_free(backend_ctx->smpl);
+        backend_ctx->smpl = nullptr;
+    }
     if (backend_ctx->ctx)
     {
         llama_free(backend_ctx->ctx);
         backend_ctx->ctx = nullptr;
-    }
-        
-    if(backend_ctx->smpl)
-    {
-        llama_sampler_free(backend_ctx->smpl);
-        backend_ctx->smpl = nullptr;        
     }
     if (backend_ctx->model)
     {
         llama_model_free(backend_ctx->model);
         backend_ctx->model = nullptr;
     }
-        
-
     // ggml_backend_free();
-
     delete backend_ctx;
     return success;
 }
@@ -476,6 +474,9 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
     } catch (const std::exception& e) {
         std::string error_str = "Inference failed: " + std::string(e.what());
         return runtime_error; // Indicate failure
+    }
+    for (auto & msg : messages) {
+        free(const_cast<char *>(msg.content));
     }
     return success;
 }

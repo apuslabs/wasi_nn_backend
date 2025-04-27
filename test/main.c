@@ -11,13 +11,14 @@ typedef wasi_nn_error (*load_by_name_with_configuration_func)(void *ctx, const c
 typedef wasi_nn_error (*init_execution_context_func)(void *ctx, graph g, graph_execution_context *exec_ctx);
 typedef wasi_nn_error (*run_inference_func)(void *ctx, graph_execution_context exec_ctx, uint32_t index,
                                             tensor *input_tensor, tensor_data output_tensor, uint32_t *output_tensor_size);
+typedef wasi_nn_error (*deinit_backend_func)(void *ctx);
 int main() {
     void *handle;
     init_backend_func init_backend;
     load_by_name_with_configuration_func load_by_name_with_config;
     init_execution_context_func init_execution_context;
     run_inference_func run_inference;
-
+    deinit_backend_func deinit_backend;
     // Load the shared library
     handle = dlopen("./build/libwasi_nn_backend.so", RTLD_LAZY);
     if (!handle) {
@@ -33,6 +34,7 @@ int main() {
     *(void **) (&load_by_name_with_config) = dlsym(handle, "load_by_name_with_config");
     *(void **) (&init_execution_context) = dlsym(handle, "init_execution_context");
     *(void **) (&run_inference) = dlsym(handle, "run_inference");
+    *(void **) (&deinit_backend) = dlsym(handle, "deinit_backend");
     printf("Library Load successfully.\n");
     char *error;
     if ((error = dlerror()) != NULL) {
@@ -114,6 +116,13 @@ int main() {
     // Print output
     printf("Output: %s\n", output_tensor);
 
+    err = deinit_backend(backend_ctx);
+    if (err != success) {
+        fprintf(stderr, "Failed to Deinitialize backend\n");
+        dlclose(handle);
+        return EXIT_FAILURE;
+    }
+    printf("Backend deinitialized successfully\n");
     // Clean up
     free(output_tensor);
     dlclose(handle);
