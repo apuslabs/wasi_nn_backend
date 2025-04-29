@@ -468,6 +468,7 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
             return response;
         };
         std::string res = generate(prompt);
+        *output_tensor_size = res.size();
         copy_string_to_tensor_data(output_tensor, *output_tensor_size, res);
         return success; // Success
 
@@ -478,6 +479,7 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
     for (auto & msg : messages) {
         free(const_cast<char *>(msg.content));
     }
+
     return success;
 }
 
