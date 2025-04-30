@@ -58,7 +58,7 @@ int main() {
     printf("Backend initialized successfully\n");
 
     // Load model with configuration
-    const char *model_filename = "./test/Qwen2.5-1.5B-Instruct.Q2_K.gguf"; // Update with your model file path
+    const char *model_filename = "./test/qwen1_5-14b-chat-q2_k.gguf"; // Update with your model file path
     const char* config = "{\"n_gpu_layers\":98,\"ctx_size\":2048,\"stream-stdout\":true,\"enable_debug_log\":true}";
     err = load_by_name_with_config(backend_ctx, model_filename,strlen(model_filename),config,strlen(config), &g);
     if (err != success) {
@@ -79,8 +79,8 @@ int main() {
 
     // Prepare input tensor
     tensor input_tensor;
-    const char *prompt1 = "Hello, who are you?";
-    const char *prompt2 = "What is the meaning of life";
+    const char *prompt1 = "Hello, I am Alex, who are you?";
+    const char *prompt2 = "Do you know Arweave?";
     input_tensor.data = (tensor_data)prompt1;
     input_tensor.dimensions = NULL; // Assuming not needed for this example
     input_tensor.type = fp32; // Assuming fp32 for this example
@@ -102,7 +102,7 @@ int main() {
         dlclose(handle);
         return EXIT_FAILURE;
     }
-    printf("run Inference1 successful\n");
+    printf("\nrun Inference1 successful\n");
     printf("Output: %s\n", output_tensor);
     input_tensor.data = (tensor_data)prompt2;
     err = run_inference(backend_ctx, exec_ctx, 0, &input_tensor, output_tensor, &output_tensor_size);
@@ -112,7 +112,7 @@ int main() {
         dlclose(handle);
         return EXIT_FAILURE;
     }
-    printf("run Inference2 successful\n");
+    printf("\nrun Inference2 successful\n");
     // Print output
     printf("Output: %s\n", output_tensor);
 

@@ -183,7 +183,7 @@ llama_model_params_from_wasi_nn_llama_config(
 
 
 // Function to safely copy a string into tensor_data
-void copy_string_to_tensor_data(tensor_data dest, uint32_t dest_size, const std::string &src) {
+void copy_string_to_tensor_data(tensor_data dest, uint32_t dest_size, std::string src) {
     if (dest == nullptr || dest_size == 0) {
         NN_ERR_PRINTF("Destination buffer is null or size is zero");
         return;
@@ -192,11 +192,17 @@ void copy_string_to_tensor_data(tensor_data dest, uint32_t dest_size, const std:
     size_t src_size = src.size();
     if (src_size >= dest_size) {
         NN_WARN_PRINTF("Source string is too long, truncating");
+        NN_WARN_PRINTF("Destination buffer size: %i, Source string size: %li", dest_size, src_size);
         src_size = dest_size - 1; // Leave space for the null terminator
     }
 
-    strncpy(reinterpret_cast<char*>(dest), src.c_str(), src_size);
-    dest[src_size] = '\0'; // Ensure null termination
+    // Use std::copy to transfer the string data
+    std::copy(src.begin(), src.begin() + src_size, reinterpret_cast<uint8_t*>(dest));
+
+    // Ensure null termination
+    if (dest_size > 0) {
+        dest[src_size] = '\0';
+    }
 }
 static struct llama_context_params
 llama_context_params_from_wasi_nn_llama_config(
@@ -468,7 +474,7 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
             return response;
         };
         std::string res = generate(prompt);
-        *output_tensor_size = res.size();
+        *output_tensor_size = res.size()+1;
         copy_string_to_tensor_data(output_tensor, *output_tensor_size, res);
         return success; // Success
 
