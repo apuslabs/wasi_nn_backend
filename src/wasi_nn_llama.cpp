@@ -392,6 +392,12 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
           tensor *input_tensor,tensor_data output_tensor, uint32_t *output_tensor_size)
 {
     struct LlamaContext *backend_ctx = (struct LlamaContext *)ctx;
+    
+    // Clear the KV cache to start a new chat session
+    if (backend_ctx && backend_ctx->ctx) {
+        llama_kv_self_clear(backend_ctx->ctx);
+    }
+    
     char *prompt_text = (char *)input_tensor->data;
     
     const char * tmpl = llama_model_chat_template(backend_ctx->model, /* name */ nullptr);
