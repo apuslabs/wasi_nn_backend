@@ -372,9 +372,9 @@ init_execution_context(void *ctx, graph g, graph_execution_context *exec_ctx)
 
     
     llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(0));
-    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(64,1.5,0.0,0.0));
+    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(0,1,0.0,0.0));
     
     if (smpl == NULL) {
         NN_ERR_PRINTF("Failed to create smpl for model");
@@ -429,7 +429,6 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
             std::string response;
     
             const bool is_first = llama_kv_self_used_cells(backend_ctx->ctx) == 0;
-    
             // tokenize the prompt
             const int n_prompt_tokens = -llama_tokenize(backend_ctx->vocab, prompt.c_str(), prompt.size(), NULL, 0, is_first, true);
             std::vector<llama_token> prompt_tokens(n_prompt_tokens);
