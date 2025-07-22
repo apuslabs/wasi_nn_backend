@@ -1,6 +1,9 @@
 find_package(cjson REQUIRED)
 find_package(llamacpp REQUIRED)
 
+# Build mtmd library from llama.cpp
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/lib/llama.cpp/tools/mtmd mtmd)
+
 # Generate the required static assets for server
 set(PUBLIC_ASSETS
     index.html.gz
@@ -24,19 +27,12 @@ foreach(asset ${PUBLIC_ASSETS})
     set_source_files_properties(${output} PROPERTIES GENERATED TRUE)
 endforeach()
 
-# Create the new llama_server library (wrapping server.cpp from llama.cpp)
+# Create the llama_server library
 add_library(
     llama_server
     SHARED
         ${CMAKE_CURRENT_SOURCE_DIR}/src/llama_server.cpp
         ${GENERATED_ASSETS}
-)
-
-# Keep the old wasi_nn_backend for backward compatibility
-add_library(
-    wasi_nn_backend
-    SHARED
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/wasi_nn_llama.cpp
 )
 
 target_include_directories(
@@ -54,13 +50,6 @@ target_include_directories(
         ${cjson_SOURCE_DIR}
 )
 
-target_include_directories(
-    wasi_nn_backend
-    PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        ${cjson_SOURCE_DIR}
-)
-
 # Link libraries for llama_server
 target_link_libraries(
     llama_server
@@ -74,22 +63,11 @@ target_link_libraries(
         pthread
 )
 
-# Link libraries for wasi_nn_backend
-target_link_libraries(
-    wasi_nn_backend
-    PUBLIC
-        cjson
-        common
-        ggml
-        llama
-)
-
 # Set C++ standard
 target_compile_features(llama_server PRIVATE cxx_std_17)
-target_compile_features(wasi_nn_backend PRIVATE cxx_std_17)
 
-# Install both libraries
-install(TARGETS llama_server wasi_nn_backend
+# Install library
+install(TARGETS llama_server
     LIBRARY DESTINATION lib
 )
 

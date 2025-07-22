@@ -6,7 +6,7 @@
 #ifndef LLAMA_CHAT_LIB_H
 #define LLAMA_CHAT_LIB_H
 
-#include "../../../native/wasi_nn_llama/include/wasi_nn_llama.h"
+#include "../include/wasi_nn_llama.h"
 
 #ifdef __cplusplus
 extern "C" {

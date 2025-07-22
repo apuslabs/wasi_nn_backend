@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(wasi_nn_backend C CXX CUDA)
+project(llama_server_lib C CXX CUDA)
 
 # Setup job pool
 
@@ -48,4 +48,4 @@ endif()
 
 
 # Include main build logic
-include(wasi_nn)
+include(llama_server)

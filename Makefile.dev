@@ -1,0 +1,45 @@
+# Simple Makefile for testing the build
+.PHONY: all clean build test
+
+# Default target
+all: build
+
+# Create build directory and run cmake
+build:
+	mkdir -p build
+	cd build && cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+	cd build && make -j$(nproc)
+
+# Clean build directory
+clean:
+	rm -rf build
+
+# Run tests (build first if needed)
+test: build
+	cd build && ./test_llama_server
+
+# Run example
+example: build
+	cd build && ./simple_inference
+
+# Install the library
+install: build
+	cd build && sudo make install
+
+# Development build with verbose output
+dev:
+	mkdir -p build
+	cd build && cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_VERBOSE_MAKEFILE=ON
+	cd build && make -j$(nproc) VERBOSE=1
+
+# Help
+help:
+	@echo "Available targets:"
+	@echo "  all      - Build the project (default)"
+	@echo "  build    - Build the project"
+	@echo "  clean    - Clean build directory"
+	@echo "  test     - Run tests"
+	@echo "  example  - Run simple example"
+	@echo "  install  - Install the library"
+	@echo "  dev      - Development build with verbose output"
+	@echo "  help     - Show this help"
