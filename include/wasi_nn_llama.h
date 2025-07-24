@@ -149,10 +149,7 @@
  __attribute__((visibility("default"))) wasi_nn_error
  load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
 	const char *config, uint32_t config_len, graph *g);
-
- __attribute__((visibility("default"))) wasi_nn_error
- init_backend_with_config(void **ctx, const char *config,
-	uint32_t config_len);
+ 
  __attribute__((visibility("default"))) wasi_nn_error
  init_execution_context(void *ctx, graph g, graph_execution_context *exec_ctx);
  
