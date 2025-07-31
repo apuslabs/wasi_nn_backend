@@ -2,3 +2,6 @@ build/
 lib/
 .vscode/
 .cache/
+main
+main.o
+*.gguf
