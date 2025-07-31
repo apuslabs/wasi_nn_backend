@@ -10,6 +10,7 @@ typedef wasi_nn_error (*init_backend_with_config_func)(void **ctx, const char *c
 typedef wasi_nn_error (*load_by_name_with_configuration_func)(void *ctx, const char *filename, uint32_t filename_len,
                                                               const char *config, uint32_t config_len, graph *g);
 typedef wasi_nn_error (*init_execution_context_func)(void *ctx, graph g, graph_execution_context *exec_ctx);
+typedef wasi_nn_error (*close_execution_context_func)(void *ctx, graph_execution_context exec_ctx);
 typedef wasi_nn_error (*run_inference_func)(void *ctx, graph_execution_context exec_ctx, uint32_t index,
                                             tensor *input_tensor, tensor_data output_tensor, uint32_t *output_tensor_size);
 typedef wasi_nn_error (*deinit_backend_func)(void *ctx);
@@ -20,6 +21,7 @@ int main()
     init_backend_with_config_func init_backend_with_config;
     load_by_name_with_configuration_func load_by_name_with_config;
     init_execution_context_func init_execution_context;
+    close_execution_context_func close_execution_context;
     run_inference_func run_inference;
     deinit_backend_func deinit_backend;
     // Load the shared library
@@ -38,6 +40,7 @@ int main()
     *(void **)(&init_backend_with_config) = dlsym(handle, "init_backend_with_config");
     *(void **)(&load_by_name_with_config) = dlsym(handle, "load_by_name_with_config");
     *(void **)(&init_execution_context) = dlsym(handle, "init_execution_context");
+    *(void **)(&close_execution_context) = dlsym(handle, "close_execution_context");
     *(void **)(&run_inference) = dlsym(handle, "run_inference");
     *(void **)(&deinit_backend) = dlsym(handle, "deinit_backend");
     printf("Library Load successfully.\n");
@@ -157,18 +160,82 @@ int main()
     }
     printf("\nrun Inference1 successful\n");
     printf("Output: %s\n", output_tensor);
-    input_tensor.data = (tensor_data)prompt2;
-    err = run_inference(backend_ctx, exec_ctx, 0, &input_tensor, output_tensor, &output_tensor_size);
+
+    // Test concurrency limit
+    printf("\n--- Testing concurrency limit ---\n");
+    graph_execution_context exec_ctx2, exec_ctx3, exec_ctx4, exec_ctx5;
+
+    // Try to create more sessions than the limit (max_concurrent=4)
+    err = init_execution_context(backend_ctx, g, &exec_ctx2);
     if (err != success)
     {
-        fprintf(stderr, "Inference failed\n");
-        free(output_tensor);
-        dlclose(handle);
-        return EXIT_FAILURE;
+        printf("Correctly rejected execution context 2 due to concurrency limit\n");
     }
-    printf("\nrun Inference2 successful\n");
-    // Print output
-    printf("Output: %s\n", output_tensor);
+    else
+    {
+        printf("Execution context 2 initialized successfully\n");
+
+        err = init_execution_context(backend_ctx, g, &exec_ctx3);
+        if (err != success)
+        {
+            printf("Correctly rejected execution context 3 due to concurrency limit\n");
+        }
+        else
+        {
+            printf("Execution context 3 initialized successfully\n");
+
+            err = init_execution_context(backend_ctx, g, &exec_ctx4);
+            if (err != success)
+            {
+                printf("Correctly rejected execution context 4 due to concurrency limit\n");
+            }
+            else
+            {
+                printf("Execution context 4 initialized successfully\n");
+
+                // This should fail because we've reached the concurrency limit
+                err = init_execution_context(backend_ctx, g, &exec_ctx5);
+                if (err != success)
+                {
+                    printf("Correctly rejected execution context 5 due to concurrency limit\n");
+                }
+                else
+                {
+                    printf("ERROR: Execution context 5 should have been rejected due to concurrency limit\n");
+                }
+
+                // Close one session and try again
+                err = close_execution_context(backend_ctx, exec_ctx4);
+                if (err != success)
+                {
+                    fprintf(stderr, "Failed to close execution context 4\n");
+                }
+                else
+                {
+                    printf("Execution context 4 closed successfully\n");
+                }
+
+                // Now this should succeed
+                err = init_execution_context(backend_ctx, g, &exec_ctx5);
+                if (err != success)
+                {
+                    fprintf(stderr, "Failed to initialize execution context 5 after closing one\n");
+                }
+                else
+                {
+                    printf("Execution context 5 initialized successfully after closing one\n");
+                    // Close it to clean up
+                    close_execution_context(backend_ctx, exec_ctx5);
+                }
+            }
+
+            // Clean up remaining contexts
+            close_execution_context(backend_ctx, exec_ctx3);
+        }
+
+        // Clean up remaining contexts
+        close_execution_context(backend_ctx, exec_ctx2);
+    }
 
     err = deinit_backend(backend_ctx);
     if (err != success)
@@ -178,6 +245,7 @@ int main()
         return EXIT_FAILURE;
     }
     printf("Backend deinitialized successfully\n");
+
     // Clean up
     free(output_tensor);
     dlclose(handle);

@@ -54,7 +54,7 @@ Enhance the wasi_nn_backend implementation to include advanced features while ma
 
 **Tasks:**
 - [x] Extend config parsing in `init_backend_with_config`
-- [ ] Implement concurrency limit management
+- [x] Implement concurrency limit management
 - [ ] Add queue management system
 - [ ] Implement memory policy configuration
 - [ ] Add logging configuration support

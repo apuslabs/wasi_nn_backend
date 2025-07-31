@@ -58,6 +58,7 @@ struct LlamaChatContext
   // Concurrency and queue management
   uint32_t max_concurrent;
   uint32_t queue_size;
+  uint32_t active_sessions; // Track active sessions
 
   // Memory policy
   bool context_shifting_enabled;
@@ -84,7 +85,7 @@ struct LlamaChatContext
       : model(nullptr), ctx(nullptr), smpl(nullptr), vocab(nullptr),
         threadpool(nullptr), threadpool_batch(nullptr), next_exec_ctx_id(1),
         max_sessions(100), idle_timeout_ms(300000), auto_cleanup_enabled(true),
-        max_concurrent(8), queue_size(50),
+        max_concurrent(8), queue_size(50), active_sessions(0),
         context_shifting_enabled(true), cache_strategy("lru"), max_cache_tokens(10000),
         log_level("info"), enable_debug_log(false),
         batch_processing_enabled(true), batch_size(512),
@@ -526,6 +527,14 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
   if (!chat_ctx || !chat_ctx->model)
     return invalid_argument;
 
+  // Check concurrency limit
+  if (chat_ctx->active_sessions + 1 > chat_ctx->max_concurrent)
+  {
+    NN_ERR_PRINTF("Concurrency limit reached: %d active sessions, max allowed: %d",
+                  chat_ctx->active_sessions, chat_ctx->max_concurrent);
+    return runtime_error;
+  }
+
   // Auto-cleanup on entry
   auto_cleanup_sessions(chat_ctx);
 
@@ -558,12 +567,13 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
   session_info.last_activity = std::chrono::steady_clock::now();
 
   chat_ctx->sessions[new_exec_ctx] = std::move(session_info);
+  chat_ctx->active_sessions++; // Increment active sessions counter
 
   *exec_ctx = new_exec_ctx;
 
   NN_INFO_PRINTF(
-      "Execution context %d initialized. Active sessions: %zu",
-      new_exec_ctx, chat_ctx->sessions.size());
+      "Execution context %d initialized. Active sessions: %d, Max concurrent: %d",
+      new_exec_ctx, chat_ctx->active_sessions, chat_ctx->max_concurrent);
 
   return success;
 }
@@ -581,6 +591,10 @@ close_execution_context(void *ctx, graph_execution_context exec_ctx)
     NN_INFO_PRINTF("Closing execution context %d for session '%s'", exec_ctx,
                    it->second.session_id.c_str());
     chat_ctx->sessions.erase(it);
+    if (chat_ctx->active_sessions > 0)
+    {
+      chat_ctx->active_sessions--; // Decrement active sessions counter
+    }
     return success;
   }
 
