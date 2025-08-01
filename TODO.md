@@ -1,34 +1,183 @@
-# wasi_nn_backend Enhancement Plan - PROJECT COMPLETED ✅
+# WASI-NN Backend Development Status & TODO
 
-## 🎉 FINAL STATUS: ALL PHASES COMPLETED SUCCESSFULLY
+## 📊 Current Project Status
 
-**Latest Update**: Phase 5.3 Advanced Stopping Criteria implementation completed and compiled successfully. All planned features now fully implemented and production-ready.
+### ✅ **Completed Phases (1-6)**
+**Status**: Production-ready core implementation achieved
 
-## Updated Plan with llama.cpp Server Integration
+**Latest Milestone**: Advanced Stopping Criteria (Phase 5.3) completed successfully  
+**Build Status**: ✅ Compiles successfully (`libwasi_nn_backend.so`)  
+**Test Coverage**: ✅ 24/24 tests passing  
+**Backward Compatibility**: ✅ 100% maintained  
 
-This plan has been updated to integrate the llama.cpp server functionality into the WASI-NN backend, following an iterative approach with testing at each phase.
+### 📋 **Current Phase: Phase 7 Quality Optimizations**
 
-## Overview
-Enhance the wasi_nn_backend implementation to include advanced features while maintaining backward- ✅ **Stable model hot-swapping with automatic task queue coordination**
-- ✅ **Complete resource cleanup and rollback capability during model switches**
-- ✅ **Advanced stopping criteria with grammar triggers, context-aware stopping, and semantic detection**
-- ✅ Comprehensive configuration support for all sampling parametersmpatibility with existing interfaces.
+**Objective**: Enhance generation quality and system robustness based on llama.cpp server.cpp analysis
 
-## Goals
-1. Advanced Concurrency and Task Management
-2. Model reloading and hot-swapping capabilities
-3. Sophisticated Memory Management
-4. Comprehensive sampling parameter support
-5. Advanced stopping criteria
-6. Comprehensive logging
-7. Better Error Handling and Validation
-8. Performance Optimizations
+**Timeline**: 3-week structured implementation  
+**Priority**: Reference-driven quality improvements  
+**Focus**: Production-grade parameter handling and error diagnostics  
 
-## Implementation Approach
-- Maximize retention of existing interfaces
-- Extend functionality through configuration parameters
-- Add minimal new APIs only when necessary
-- Maintain 100% backward compatibility
+## 🎯 Phase 7 Implementation TODO
+
+### Week 1: Critical Foundation
+**Priority: CRITICAL** - Prevents crashes and enables advanced features
+
+#### 7.1 Enhanced Parameter Validation ⚠️
+- [ ] **Create comprehensive validation function**
+  ```cpp
+  static wasi_nn_error validate_sampling_params(const common_params_sampling& params, llama_context* ctx)
+  ```
+- [ ] **Add range checking for all parameters**
+  - temperature: 0.0-2.0
+  - top_p: 0.0-1.0  
+  - top_k: >= 0
+  - repeat_penalty: >= 0.0
+- [ ] **Implement automatic parameter adjustment**
+  - penalty_last_n = -1 → ctx_size
+  - dry_penalty_last_n = -1 → ctx_size
+- [ ] **Add cross-parameter dependency validation**
+- [ ] **Test with invalid parameter combinations**
+
+#### 7.2 Robust Configuration Parsing 🔧
+- [ ] **Implement nested parameter support**
+  ```json
+  {
+    "sampling": {
+      "dynatemp": {"range": 0.1, "exponent": 1.2}
+    }
+  }
+  ```
+- [ ] **Create configuration hierarchy system**
+  - Global defaults → Model defaults → Session overrides
+- [ ] **Add deep structure validation**
+- [ ] **Implement smart default value inheritance**
+- [ ] **Add configuration schema validation**
+
+### Week 2: Quality Improvements  
+**Priority: HIGH** - Improves generation quality and user experience
+
+#### 7.3 Enhanced Sampling Parameters 🎨
+- [ ] **Add dynamic temperature parameters**
+  ```cpp
+  params.sampling.dynatemp_range = json_get_double(config, "dynatemp_range", 0.0);
+  params.sampling.dynatemp_exponent = json_get_double(config, "dynatemp_exponent", 1.0);
+  ```
+- [ ] **Add DRY repetition suppression**
+  ```cpp
+  params.sampling.dry_multiplier = json_get_double(config, "dry_multiplier", 0.0);
+  params.sampling.dry_base = json_get_double(config, "dry_base", 1.75);
+  params.sampling.dry_allowed_length = json_get_int(config, "dry_allowed_length", 2);
+  params.sampling.dry_penalty_last_n = json_get_int(config, "dry_penalty_last_n", 256);
+  ```
+- [ ] **Integrate with llama.cpp sampling chain**
+- [ ] **Add parameter validation for new parameters**
+- [ ] **Test quality improvements with before/after comparisons**
+
+#### 7.4 Enhanced Error Handling and Logging 📝
+- [ ] **Implement server.cpp style logging macros**
+  ```cpp
+  #define SRV_INF(fmt, ...) WASI_NN_LOG_INFO(ctx, fmt, ##__VA_ARGS__)
+  #define SRV_ERR(fmt, ...) WASI_NN_LOG_ERROR(ctx, fmt, ##__VA_ARGS__)
+  ```
+- [ ] **Add detailed error messages with suggestions**
+  ```cpp
+  WASI_NN_LOG_ERROR(ctx, "Failed to load model '%s': %s\n"
+                         "Suggestion: Check file path and permissions\n"
+                         "Available memory: %.2f GB, Required: %.2f GB",
+                    model_path, error_detail, avail_mem, req_mem);
+  ```
+- [ ] **Include system resource information in error logs**
+- [ ] **Add context-aware error reporting**
+- [ ] **Implement error recovery suggestions**
+
+### Week 3: Performance Optimization
+**Priority: HIGH** - Optimizes resource usage and prevents OOM
+
+#### 7.5 Advanced Memory Management 🧠
+- [ ] **Implement dynamic GPU layer calculation**
+  ```cpp
+  static int calculate_optimal_gpu_layers(size_t available_vram, size_t model_size);
+  ```
+- [ ] **Add automatic batch size adjustment**
+  ```cpp
+  static uint32_t adjust_batch_size_for_memory(uint32_t requested, size_t available_mem);
+  ```
+- [ ] **Create intelligent cache management system**
+  ```cpp
+  struct advanced_cache_policy {
+      bool enable_prompt_cache;
+      bool enable_kv_cache_reuse;
+      uint32_t cache_retention_ms;
+      float cache_similarity_threshold;
+  };
+  ```
+- [ ] **Implement memory pressure detection and handling**
+- [ ] **Add cache reuse mechanisms for similar prompts**
+
+#### 7.6 Performance Testing and Validation 🧪
+- [ ] **Create benchmark suite for quality improvements**
+- [ ] **Add memory usage monitoring and reporting**
+- [ ] **Test with multiple model sizes and configurations**
+- [ ] **Validate backward compatibility with existing tests**
+- [ ] **Extend test suite to 30+ tests covering new features**
+
+## 🔄 Ongoing Maintenance Tasks
+
+### Code Quality
+- [ ] **Regular server.cpp synchronization review**
+- [ ] **Parameter completeness audit against latest llama.cpp**
+- [ ] **Performance regression testing**
+- [ ] **Documentation updates for new features**
+
+### Testing and Validation
+- [ ] **Continuous integration setup**
+- [ ] **Multi-GPU configuration testing**
+- [ ] **Large model (>30B) validation**
+- [ ] **Edge case scenario testing**
+
+## 📈 Success Metrics for Phase 7
+
+### Quality Improvements
+- [ ] **Zero parameter-related crashes** (100% validation coverage)
+- [ ] **Measurable generation quality improvement** (before/after benchmarks)
+- [ ] **Professional error diagnostics** (detailed messages with suggestions)
+
+### Performance Optimizations  
+- [ ] **Reduced memory usage** (intelligent allocation strategies)
+- [ ] **Improved cache efficiency** (reuse mechanisms)
+- [ ] **Optimal resource utilization** (dynamic adjustments)
+
+### User Experience
+- [ ] **Seamless configuration experience** (nested parameters)
+- [ ] **Enhanced debugging capabilities** (detailed logs and diagnostics)
+- [ ] **Full backward compatibility** (existing code continues to work)
+
+## 🚀 Future Considerations (Phase 8+)
+
+### Advanced Features (Low Priority)
+- [ ] **Speculative execution support** (if beneficial)
+- [ ] **Advanced batch processing optimizations**
+- [ ] **Multi-model concurrent execution**
+- [ ] **Advanced caching strategies**
+
+### Research Areas
+- [ ] **Custom sampler implementations**
+- [ ] **Model-specific optimizations**
+- [ ] **Advanced stopping criteria extensions**
+
+## 📝 Development Notes
+
+### Reference Implementation
+- **Primary Source**: `lib/llama.cpp/tools/server/server.cpp`
+- **Analysis Method**: Grep-based parameter discovery and validation pattern study
+- **Quality Standard**: Match server.cpp parameter completeness and validation depth
+
+### Implementation Principles
+- **Backward Compatibility**: All existing APIs must continue to work
+- **Progressive Enhancement**: New features are additive, not replacements
+- **Quality Focus**: Only implement parameters that measurably improve results
+- **Production Ready**: Comprehensive validation and error handling required
 
 ## Detailed Implementation Plan
 
@@ -343,11 +492,13 @@ Core integration successfully completed. Model loading, backend initialization, 
 3. ✅ Final validation of backward compatibility
 4. ✅ Documentation updates and deployment preparation
 
-## Current Project Status: ALL PHASES COMPLETE ✅
+## Current Project Status: PHASES 1-6 COMPLETE, PHASE 7 PLANNED ✅
 
-**MAJOR PROJECT MILESTONE**: **ALL DEVELOPMENT PHASES SUCCESSFULLY COMPLETED** 🎉
+**MAJOR PROJECT MILESTONE**: **CORE DEVELOPMENT PHASES COMPLETED** 🎉
 
-**Complete Feature Set Achievements**:
+**Phase 7 Optimization Goals**: Based on llama.cpp server.cpp analysis, enhance generation quality, system robustness, and user experience through targeted improvements.
+
+**Complete Feature Set Achievements (Phases 1-6)**:
 - ✅ **Phase 4.1**: Enhanced Configuration System - Complete support for advanced parameters
 - ✅ **Phase 4.2**: Advanced Concurrency Management - Full task queuing and priority handling
 - ✅ **Phase 4.3**: Advanced Memory Management - Automatic KV cache optimization and context shifting
@@ -384,6 +535,8 @@ Core integration successfully completed. Model loading, backend initialization, 
 - ✅ **Stable operation with GPU acceleration throughout model switches**
 - ✅ Signal handling protection for dangerous edge cases
 - ✅ Backward compatibility verification
+
+**Phase 7 Target**: Extend test suite to 30+ tests covering new sampling parameters, validation logic, and advanced memory management.
 
 **Key Model Switching Achievement**:
 - ✅ Successfully tested switching between different model architectures:
@@ -465,9 +618,247 @@ Core integration successfully completed. Model loading, backend initialization, 
 
 - **Phase 6**: Final Integration and Validation ✅
 
-**Project Status**: **COMPLETE AND PRODUCTION-READY** 🚀
+**Project Status**: **READY FOR PHASE 7 OPTIMIZATIONS** 🚀
 
-The WASI-NN backend now provides a comprehensive, production-ready implementation with all planned advanced features including stable model hot-swapping capabilities, advanced stopping criteria with grammar triggers and semantic detection, and comprehensive logging integration. The system successfully handles complex workloads with GPU acceleration, advanced concurrency management, intelligent memory optimization, comprehensive logging, safe model switching between different architectures, and sophisticated stopping condition management.
+The WASI-NN backend now provides a comprehensive, production-ready implementation with all planned advanced features. Phase 7 optimizations will further enhance quality and robustness.
+
+## Phase 7: Advanced Quality and Robustness Optimizations
+
+Based on llama.cpp server.cpp analysis, the following improvements will significantly enhance generation quality, system robustness, and user experience:
+
+### 7.1 Enhanced Sampling Parameters - High Impact ⭐
+**Priority: HIGH** - Directly improves generation quality
+
+**Key Parameters to Add**:
+```json
+{
+  "sampling": {
+    "dynatemp_range": 0.0,      // Dynamic temperature range (0.0 = disabled)
+    "dynatemp_exponent": 1.0,   // Dynamic temperature scaling exponent
+    "dry_multiplier": 0.0,      // DRY repetition suppression multiplier (0.0 = disabled)
+    "dry_base": 1.75,           // DRY base penalty value
+    "dry_allowed_length": 2,    // DRY allowed repetition length
+    "dry_penalty_last_n": 256   // DRY penalty context window (-1 = ctx_size)
+  }
+}
+```
+
+**Benefits**:
+- **Dynamic Temperature**: Automatically adjusts temperature based on text complexity for better coherence
+- **DRY Suppression**: Prevents repetitive outputs, significantly improves generation quality
+- **Minimal Complexity**: Only 6 parameters, user-friendly defaults
+
+**Implementation Tasks**:
+- [ ] Add dynatemp and DRY parameter parsing in `parse_config_to_params()`
+- [ ] Integrate parameters with llama.cpp sampling chain
+- [ ] Add parameter validation and range checking
+- [ ] Test quality improvements with before/after comparisons
+
+### 7.2 Comprehensive Parameter Validation - Critical ⭐
+**Priority: CRITICAL** - Prevents crashes and improves robustness
+
+**Current Gaps**:
+```cpp
+// Missing validations that server.cpp has:
+if (temperature < 0.0 || temperature > 2.0) return error();
+if (top_p < 0.0 || top_p > 1.0) return error();
+if (top_k < 0) return error();
+if (repeat_penalty < 0.0) return error();
+// ... and many more
+```
+
+**Implementation Strategy**:
+```cpp
+static wasi_nn_error validate_sampling_params(const common_params_sampling& params, llama_context* ctx) {
+    // Range validations
+    if (params.temp < 0.0f || params.temp > 2.0f) {
+        return wasi_nn_error_invalid_argument;
+    }
+    
+    // Dynamic adjustments (like server.cpp)
+    if (params.penalty_last_n == -1) {
+        params.penalty_last_n = llama_n_ctx(ctx);
+    }
+    
+    // Cross-parameter dependencies
+    if (params.dynatemp_range > 0.0f && params.temp <= 0.0f) {
+        return wasi_nn_error_invalid_argument;
+    }
+    
+    return wasi_nn_error_none;
+}
+```
+
+**Implementation Tasks**:
+- [ ] Create comprehensive parameter validation function
+- [ ] Add automatic parameter adjustment logic (like penalty_last_n = -1)
+- [ ] Implement cross-parameter dependency checks
+- [ ] Add detailed error messages for debugging
+- [ ] Test with invalid parameter combinations
+
+### 7.3 Enhanced Error Handling and Logging - High Impact ⭐
+**Priority: HIGH** - Better debugging and user experience
+
+**Current vs Target**:
+```cpp
+// Current (basic):
+WASI_NN_LOG_ERROR(ctx, "Failed to load model");
+
+// Target (detailed like server.cpp):
+WASI_NN_LOG_ERROR(ctx, "Failed to load model '%s': %s\n"
+                       "Suggestion: Check file path and permissions\n"
+                       "Available memory: %.2f GB\n"
+                       "Required memory: %.2f GB", 
+                  model_path, error_detail, avail_mem, req_mem);
+```
+
+**Enhanced Log Categories**:
+- `SRV_INF` - Server information
+- `SRV_ERR` - Server errors with suggestions
+- `SRV_WRN` - Server warnings
+- `SRV_DBG` - Server debug information
+
+**Implementation Tasks**:
+- [ ] Implement server.cpp style logging macros
+- [ ] Add detailed error messages with suggestions
+- [ ] Include system resource information in error logs
+- [ ] Add context-aware error reporting
+- [ ] Implement error recovery suggestions
+
+### 7.4 Advanced Memory Management - Performance Critical ⭐
+**Priority: HIGH** - Improves efficiency and prevents OOM
+
+**Target Improvements**:
+
+1. **Dynamic Resource Allocation**:
+```json
+{
+  "memory_management": {
+    "auto_gpu_layers": true,        // Automatically determine optimal GPU layers
+    "dynamic_batch_size": true,     // Adjust batch size based on available memory
+    "smart_context_size": true,     // Dynamic context sizing
+    "memory_pressure_threshold": 0.85  // Start optimization at 85% memory usage
+  }
+}
+```
+
+2. **Intelligent Cache Management**:
+```cpp
+struct advanced_cache_policy {
+    bool enable_prompt_cache;       // Cache common prompts
+    bool enable_kv_cache_reuse;     // Reuse KV cache between similar sessions
+    uint32_t cache_retention_ms;    // How long to keep unused cache
+    float cache_similarity_threshold; // Similarity threshold for cache reuse
+};
+```
+
+3. **Memory Pressure Handling**:
+```cpp
+static void handle_memory_pressure(wasi_nn_context* ctx) {
+    float memory_usage = get_memory_usage_ratio();
+    if (memory_usage > ctx->memory_pressure_threshold) {
+        // Intelligent cleanup decisions
+        cleanup_least_used_cache();
+        reduce_batch_size();
+        shift_context_if_needed();
+    }
+}
+```
+
+**Implementation Tasks**:
+- [ ] Implement dynamic GPU layer calculation
+- [ ] Add automatic batch size adjustment
+- [ ] Create intelligent cache management system
+- [ ] Implement memory pressure detection and handling
+- [ ] Add cache reuse mechanisms for similar prompts
+
+### 7.5 Robust Configuration Parsing - Essential ⭐
+**Priority: ESSENTIAL** - Foundation for all other improvements
+
+**Target Capabilities**:
+
+1. **Nested Parameter Support**:
+```json
+{
+  "sampling": {
+    "dynatemp": {
+      "range": 0.1,
+      "exponent": 1.2
+    }
+  },
+  "memory_management": {
+    "cache_policy": {
+      "enable_prompt_cache": true,
+      "retention_ms": 300000
+    }
+  }
+}
+```
+
+2. **Smart Default Inheritance**:
+```cpp
+// Global defaults -> Model defaults -> Session overrides
+struct config_hierarchy {
+    json global_defaults;
+    json model_defaults;
+    json session_overrides;
+};
+
+static double get_param_value(const char* path, double fallback) {
+    // Try session -> model -> global -> fallback
+    if (has_nested_param(session_overrides, path)) return get_nested_param(session_overrides, path);
+    if (has_nested_param(model_defaults, path)) return get_nested_param(model_defaults, path);
+    if (has_nested_param(global_defaults, path)) return get_nested_param(global_defaults, path);
+    return fallback;
+}
+```
+
+3. **Deep Configuration Validation**:
+```cpp
+static bool validate_config_structure(const cJSON* config) {
+    // Check required fields
+    // Validate parameter types
+    // Check parameter ranges
+    // Validate parameter dependencies
+    // Check for unknown parameters (warn but don't fail)
+    return true;
+}
+```
+
+**Implementation Tasks**:
+- [ ] Implement nested parameter parsing (`sampling.dynatemp.range`)
+- [ ] Create configuration hierarchy system (global -> model -> session)
+- [ ] Add deep structure validation
+- [ ] Implement smart default value inheritance
+- [ ] Add configuration schema validation
+
+### 7.6 Implementation Priority and Timeline
+
+**Phase 7.1 - Critical Foundation (Week 1)**:
+1. Enhanced Parameter Validation (prevents crashes)
+2. Robust Configuration Parsing (enables other features)
+
+**Phase 7.2 - Quality Improvements (Week 2)**:
+1. Enhanced Sampling Parameters (dynatemp + DRY)
+2. Enhanced Error Handling and Logging
+
+**Phase 7.3 - Performance Optimization (Week 3)**:
+1. Advanced Memory Management
+2. Performance testing and optimization
+
+**Expected Outcomes**:
+- ✅ **Improved Generation Quality**: Dynamic temperature and DRY suppression
+- ✅ **Enhanced Robustness**: Comprehensive validation prevents crashes
+- ✅ **Better User Experience**: Detailed error messages and suggestions
+- ✅ **Optimized Performance**: Intelligent memory management and caching
+- ✅ **Professional Configuration**: Nested parameters and smart defaults
+
+**Success Metrics**:
+- Zero parameter-related crashes
+- Measurable improvement in generation quality
+- Reduced memory usage and improved efficiency
+- Enhanced error diagnostic capabilities
+- Full backward compatibility maintained
 
 ## Backward Compatibility Assurance
 
