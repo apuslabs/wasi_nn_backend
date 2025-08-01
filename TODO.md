@@ -1,5 +1,9 @@
 # wasi_nn_backend Enhancement Plan
 
+## Updated Plan with llama.cpp Server Integration
+
+This plan has been updated to integrate the llama.cpp server functionality into the WASI-NN backend, following an iterative approach with testing at each phase.
+
 ## Overview
 Enhance the wasi_nn_backend implementation to include advanced features while maintaining backward compatibility with existing interfaces.
 
@@ -227,11 +231,39 @@ wasi_nn_error get_backend_status(void *ctx, backend_status_type type, char *buff
 
 ## Implementation Priority
 
-1. **Phase 1:** Enhanced config parsing (2 days)
-2. **Phase 2:** Concurrency and task management (3 days)
-3. **Phase 3:** Memory management (2 days)
-4. **Phase 4:** Advanced features (3 days)
-5. **Phase 5:** Testing and validation (2 days)
+### Phase 1: Integration Preparation - COMPLETED
+1. Copy server.cpp and related files from `lib/llama.cpp/tools/server/` to project ✓
+2. Set up build system to compile server code as part of backend ✓
+3. Generate required auto-generated files (index.html.gz.hpp, loading.html.hpp) ✓
+4. Test compilation - Ensure server code compiles successfully in project ✓
+
+### Phase 2: Core Integration (Iterative)
+1. Create basic server_context integration
+2. Test basic model loading - Verify we can load models through server context
+3. Implement task queue system
+4. Test task execution - Verify we can execute simple inference tasks
+5. Create bridge between WASI-NN interface and server's task system
+6. Test basic WASI-NN interface - Verify existing test code works with new backend
+
+### Phase 3: Feature Implementation (Iterative)
+1. Implement enhanced configuration system
+2. Test configuration parsing - Verify all sampling parameters work
+3. Add advanced concurrency and task management
+4. Test concurrency - Verify multiple sessions work correctly
+5. Implement model reloading and hot-swapping capabilities
+6. Test model switching - Verify models can be swapped without crashes
+7. Add sophisticated memory management
+8. Test memory handling - Verify stability under memory pressure
+9. Implement comprehensive sampling parameter support
+10. Test sampling parameters - Verify all sampling methods work correctly
+11. Add advanced stopping criteria
+12. Test stopping criteria - Verify all stopping conditions work
+
+### Phase 4: Final Integration and Validation
+1. Update all remaining TODO items
+2. Comprehensive testing of all features
+3. Performance optimization
+4. Final validation of backward compatibility
 
 ## Total Estimated Time: 12 days
 
@@ -242,3 +274,24 @@ All existing code using the current API will continue to work without any change
 - All current function signatures remain the same
 - Old configuration JSON structures still work
 - No breaking changes to public interfaces
+
+## Development Approach
+
+This implementation will follow an iterative development process with testing at each step:
+
+1. **Early Validation**: We'll have a working system after Phase 2 that you can test
+2. **Incremental Progress**: Each step builds on the previous one with immediate testing
+3. **Risk Mitigation**: Issues are caught early before they become complex problems
+4. **Collaborative Development**: You can review and provide feedback at each milestone
+
+For each step, I will:
+1. Implement the code changes
+2. Update the TODO.md to reflect completed work
+3. Stop and wait for your review and git commit before proceeding
+
+## Interface Compatibility Principles
+
+1. **Preserve Existing Interfaces**: All current function signatures in wasi_nn_llama.h will remain unchanged
+2. **Extend via Configuration**: New functionality will be accessed through enhanced JSON configuration parameters
+3. **Backward Compatibility**: Old configuration JSON structures will continue to work
+4. **Minimal New APIs**: Only add new functions when absolutely necessary, and only as extensions
