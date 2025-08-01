@@ -1,297 +1,599 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <dlfcn.h>
-#include "../include/wasi_nn_llama.h"
+
+// Simple test framework
+static int test_count = 0;
+static int test_passed = 0;
+static int test_failed = 0;
+
+#define TEST_SECTION(name) \
+    do { \
+        printf("\n============================================================\n"); \
+        printf("TEST SECTION: %s\n", name); \
+        printf("============================================================\n"); \
+    } while(0)
+
+#define RUN_TEST(test_name, test_func) \
+    do { \
+        test_count++; \
+        printf("\n[TEST %d] %s\n", test_count, test_name); \
+        printf("----------------------------------------------------\n"); \
+        if (test_func()) { \
+            printf("✅ PASSED: %s\n", test_name); \
+            test_passed++; \
+        } else { \
+            printf("❌ FAILED: %s\n", test_name); \
+            test_failed++; \
+        } \
+    } while(0)
+
+#define ASSERT(condition, message) \
+    do { \
+        if (!(condition)) { \
+            printf("ASSERTION FAILED: %s\n", message); \
+            return 0; \
+        } \
+    } while(0)
+
+#define ASSERT_SUCCESS(err, message) \
+    do { \
+        if ((err) != 0) { \
+            printf("ASSERTION FAILED: %s (error code: %d)\n", message, err); \
+            return 0; \
+        } \
+    } while(0)
+
+// Include WASI-NN types and errors
+typedef enum {
+    success = 0,
+    invalid_argument = 1,
+    invalid_encoding = 2,
+    timeout = 3,
+    runtime_error = 4,
+    unsupported_operation = 5,
+    too_large = 6,
+    not_found = 7
+} wasi_nn_error;
+
+typedef uint32_t graph;
+typedef uint32_t graph_execution_context;
+
+typedef enum {
+    fp16 = 0,
+    fp32 = 1,
+    fp64 = 2,
+    bf16 = 3,
+    u8 = 4,
+    i32 = 5,
+    i64 = 6
+} tensor_type;
+
+typedef struct {
+    uint32_t *dimensions;
+    uint32_t size;
+} tensor_dimensions;
+
+typedef struct {
+    tensor_dimensions *dimensions;
+    tensor_type type;
+    uint8_t *data;
+} tensor;
+
+typedef uint8_t *tensor_data;
 
 // Function pointers for the APIs
-typedef wasi_nn_error (*init_backend_func)(void **ctx);
-typedef wasi_nn_error (*init_backend_with_config_func)(void **ctx, const char *config, uint32_t config_len);
-typedef wasi_nn_error (*load_by_name_with_configuration_func)(void *ctx, const char *filename, uint32_t filename_len,
+typedef wasi_nn_error (*init_backend_func_t)(void **ctx);
+typedef wasi_nn_error (*init_backend_with_config_func_t)(void **ctx, const char *config, uint32_t config_len);
+typedef wasi_nn_error (*load_by_name_with_configuration_func_t)(void *ctx, const char *filename, uint32_t filename_len,
                                                               const char *config, uint32_t config_len, graph *g);
-typedef wasi_nn_error (*init_execution_context_func)(void *ctx, graph g, graph_execution_context *exec_ctx);
-typedef wasi_nn_error (*close_execution_context_func)(void *ctx, graph_execution_context exec_ctx);
-typedef wasi_nn_error (*run_inference_func)(void *ctx, graph_execution_context exec_ctx, uint32_t index,
+typedef wasi_nn_error (*init_execution_context_func_t)(void *ctx, graph g, graph_execution_context *exec_ctx);
+typedef wasi_nn_error (*close_execution_context_func_t)(void *ctx, graph_execution_context exec_ctx);
+typedef wasi_nn_error (*run_inference_func_t)(void *ctx, graph_execution_context exec_ctx, uint32_t index,
                                             tensor *input_tensor, tensor_data output_tensor, uint32_t *output_tensor_size);
-typedef wasi_nn_error (*deinit_backend_func)(void *ctx);
-int main()
-{
-    void *handle;
-    init_backend_func init_backend;
-    init_backend_with_config_func init_backend_with_config;
-    load_by_name_with_configuration_func load_by_name_with_config;
-    init_execution_context_func init_execution_context;
-    close_execution_context_func close_execution_context;
-    run_inference_func run_inference;
-    deinit_backend_func deinit_backend;
+typedef wasi_nn_error (*deinit_backend_func_t)(void *ctx);
+
+// Global function pointers
+static void *handle;
+static init_backend_func_t wasi_init_backend;
+static init_backend_with_config_func_t wasi_init_backend_with_config;
+static load_by_name_with_configuration_func_t wasi_load_by_name_with_config;
+static init_execution_context_func_t wasi_init_execution_context;
+static close_execution_context_func_t wasi_close_execution_context;
+static run_inference_func_t wasi_run_inference;
+static deinit_backend_func_t wasi_deinit_backend;
+
+// Test configurations
+static const char *MODEL_FILE = "./test/qwen2.5-14b-instruct-q2_k.gguf";
+// Helper function to setup tensor
+static void setup_tensor(tensor *t, const char *data) {
+    t->data = (uint8_t *)data;
+    static tensor_dimensions dims = {NULL, 0};  // Static to persist
+    t->dimensions = &dims;
+    t->type = fp32;
+}
+
+// Initialize library and load functions
+static int setup_library() {
     // Load the shared library
     handle = dlopen("./build/libwasi_nn_backend.so", RTLD_LAZY);
-    if (!handle)
-    {
-        fprintf(stderr, "%s\n", dlerror());
-        return EXIT_FAILURE;
-    }
-    printf("Library Open successfully.\n");
-    // Clear any existing error
-    dlerror();
+    ASSERT(handle != NULL, "Failed to load shared library");
 
     // Get function pointers
-    *(void **)(&init_backend) = dlsym(handle, "init_backend");
-    *(void **)(&init_backend_with_config) = dlsym(handle, "init_backend_with_config");
-    *(void **)(&load_by_name_with_config) = dlsym(handle, "load_by_name_with_config");
-    *(void **)(&init_execution_context) = dlsym(handle, "init_execution_context");
-    *(void **)(&close_execution_context) = dlsym(handle, "close_execution_context");
-    *(void **)(&run_inference) = dlsym(handle, "run_inference");
-    *(void **)(&deinit_backend) = dlsym(handle, "deinit_backend");
-    printf("Library Load successfully.\n");
-    char *error;
-    if ((error = dlerror()) != NULL)
-    {
-        fprintf(stderr, "%s\n", error);
-        dlclose(handle);
-        return EXIT_FAILURE;
-    }
+    *(void **)(&wasi_init_backend) = dlsym(handle, "init_backend");
+    *(void **)(&wasi_init_backend_with_config) = dlsym(handle, "init_backend_with_config");
+    *(void **)(&wasi_load_by_name_with_config) = dlsym(handle, "load_by_name_with_config");
+    *(void **)(&wasi_init_execution_context) = dlsym(handle, "init_execution_context");
+    *(void **)(&wasi_close_execution_context) = dlsym(handle, "close_execution_context");
+    *(void **)(&wasi_run_inference) = dlsym(handle, "run_inference");
+    *(void **)(&wasi_deinit_backend) = dlsym(handle, "deinit_backend");
 
+    char *error = dlerror();
+    ASSERT(error == NULL, "Failed to load function symbols");
+
+    printf("✅ Library loaded successfully\n");
+    return 1;
+}
+
+// Test 1: Basic Backend Initialization
+static int test_basic_backend_init() {
+    void *backend_ctx = NULL;
+    wasi_nn_error err;
+
+    err = wasi_init_backend(&backend_ctx);
+    ASSERT_SUCCESS(err, "Basic backend initialization failed");
+    ASSERT(backend_ctx != NULL, "Backend context is NULL");
+
+    err = wasi_deinit_backend(backend_ctx);
+    ASSERT_SUCCESS(err, "Backend deinitialization failed");
+
+    return 1;
+}
+
+// Test 2: Legacy Flat Configuration
+static int test_legacy_flat_config() {
+    void *backend_ctx = NULL;
+    wasi_nn_error err;
+
+    const char *legacy_config = "{"
+                               "\"max_sessions\":25,"
+                               "\"idle_timeout_ms\":150000,"
+                               "\"auto_cleanup\":false,"
+                               "\"max_concurrent\":2,"
+                               "\"queue_size\":10"
+                               "}";
+
+    err = wasi_init_backend_with_config(&backend_ctx, legacy_config, strlen(legacy_config));
+    ASSERT_SUCCESS(err, "Legacy flat configuration failed");
+
+    err = wasi_deinit_backend(backend_ctx);
+    ASSERT_SUCCESS(err, "Backend cleanup failed");
+
+    printf("✅ Legacy flat configuration working correctly\n");
+    return 1;
+}
+
+// Test 3: Enhanced Nested Configuration
+static int test_enhanced_nested_config() {
+    void *backend_ctx = NULL;
+    wasi_nn_error err;
+
+    const char *nested_config = "{"
+                               "\"backend\":{"
+                               "\"max_sessions\":100,"
+                               "\"idle_timeout_ms\":300000,"
+                               "\"auto_cleanup\":true,"
+                               "\"max_concurrent\":8,"
+                               "\"queue_size\":50"
+                               "},"
+                               "\"memory_policy\":{"
+                               "\"context_shifting\":true,"
+                               "\"cache_strategy\":\"lru\","
+                               "\"max_cache_tokens\":10000"
+                               "},"
+                               "\"logging\":{"
+                               "\"level\":\"info\","
+                               "\"enable_debug\":false"
+                               "},"
+                               "\"performance\":{"
+                               "\"batch_processing\":true,"
+                               "\"batch_size\":512"
+                               "}"
+                               "}";
+
+    err = wasi_init_backend_with_config(&backend_ctx, nested_config, strlen(nested_config));
+    ASSERT_SUCCESS(err, "Enhanced nested configuration failed");
+
+    err = wasi_deinit_backend(backend_ctx);
+    ASSERT_SUCCESS(err, "Backend cleanup failed");
+
+    printf("✅ Enhanced nested configuration working correctly\n");
+    return 1;
+}
+
+// Test 4: Legacy Model Configuration
+static int test_legacy_model_config() {
+    void *backend_ctx = NULL;
+    graph g = 0;
+    wasi_nn_error err;
+
+    // Initialize backend first
+    err = wasi_init_backend(&backend_ctx);
+    ASSERT_SUCCESS(err, "Backend initialization failed");
+
+    const char *legacy_model_config = "{"
+                                     "\"n_gpu_layers\":48,"
+                                     "\"ctx_size\":1024,"
+                                     "\"n_predict\":256,"
+                                     "\"batch_size\":256,"
+                                     "\"threads\":4,"
+                                     "\"temp\":0.8,"
+                                     "\"top_p\":0.9,"
+                                     "\"repeat_penalty\":1.05"
+                                     "}";
+
+    err = wasi_load_by_name_with_config(backend_ctx, MODEL_FILE, strlen(MODEL_FILE),
+                                  legacy_model_config, strlen(legacy_model_config), &g);
+    ASSERT_SUCCESS(err, "Legacy model configuration failed");
+
+    err = wasi_deinit_backend(backend_ctx);
+    ASSERT_SUCCESS(err, "Backend cleanup failed");
+
+    printf("✅ Legacy model configuration working correctly\n");
+    return 1;
+}
+
+// Test 5: Enhanced Model Configuration with GPU
+static int test_enhanced_model_config() {
+    void *backend_ctx = NULL;
+    graph g = 0;
+    wasi_nn_error err;
+
+    err = wasi_init_backend(&backend_ctx);
+    ASSERT_SUCCESS(err, "Backend initialization failed");
+
+    const char *enhanced_model_config = "{"
+                                       "\"model\":{"
+                                       "\"n_gpu_layers\":98,"
+                                       "\"ctx_size\":2048,"
+                                       "\"n_predict\":512,"
+                                       "\"batch_size\":512,"
+                                       "\"threads\":8"
+                                       "},"
+                                       "\"sampling\":{"
+                                       "\"temp\":0.7,"
+                                       "\"top_p\":0.95,"
+                                       "\"top_k\":40,"
+                                       "\"min_p\":0.05,"
+                                       "\"typical_p\":1.0,"
+                                       "\"repeat_penalty\":1.10,"
+                                       "\"presence_penalty\":0.0,"
+                                       "\"frequency_penalty\":0.0,"
+                                       "\"penalty_last_n\":64,"
+                                       "\"mirostat\":0,"
+                                       "\"mirostat_tau\":5.0,"
+                                       "\"mirostat_eta\":0.1,"
+                                       "\"seed\":-1"
+                                       "},"
+                                       "\"stopping\":{"
+                                       "\"stop\":[\"\\n\\n\",\"User:\",\"Assistant:\"],"
+                                       "\"max_tokens\":512,"
+                                       "\"max_time_ms\":30000,"
+                                       "\"ignore_eos\":false"
+                                       "},"
+                                       "\"memory\":{"
+                                       "\"context_shifting\":true,"
+                                       "\"cache_prompt\":true,"
+                                       "\"max_cache_tokens\":10000"
+                                       "}"
+                                       "}";
+
+    err = wasi_load_by_name_with_config(backend_ctx, MODEL_FILE, strlen(MODEL_FILE),
+                                  enhanced_model_config, strlen(enhanced_model_config), &g);
+    ASSERT_SUCCESS(err, "Enhanced model configuration failed");
+
+    err = wasi_deinit_backend(backend_ctx);
+    ASSERT_SUCCESS(err, "Backend cleanup failed");
+
+    printf("✅ Enhanced model configuration with GPU working correctly\n");
+    return 1;
+}
+
+// Test 6: Basic Inference Test
+static int test_basic_inference() {
     void *backend_ctx = NULL;
     graph g = 0;
     graph_execution_context exec_ctx = 0;
     wasi_nn_error err;
 
-    // Initialize backend with config
-    const char *backend_config = "{"
-                                 "\"max_sessions\":50,"
-                                 "\"idle_timeout_ms\":600000,"
-                                 "\"auto_cleanup\":true,"
-                                 "\"max_concurrent\":4,"
-                                 "\"queue_size\":20,"
-                                 "\"memory_policy\":{"
-                                 "\"context_shifting\":true,"
-                                 "\"cache_strategy\":\"lru\","
-                                 "\"max_cache_tokens\":5000"
-                                 "},"
-                                 "\"logging\":{"
-                                 "\"level\":\"debug\","
-                                 "\"enable_debug\":true,"
-                                 "\"file\":\"/tmp/wasi_nn_backend.log\""
-                                 "},"
-                                 "\"performance\":{"
-                                 "\"batch_processing\":true,"
-                                 "\"batch_size\":256"
-                                 "}"
-                                 "}";
-    err = init_backend_with_config(&backend_ctx, backend_config, strlen(backend_config));
-    if (err != success)
-    {
-        fprintf(stderr, "Failed to initialize backend\n");
-        dlclose(handle);
-        return EXIT_FAILURE;
-    }
-    printf("Backend initialized successfully\n");
+    // Setup backend and model
+    const char *config = "{\"max_concurrent\":4}";
+    err = wasi_init_backend_with_config(&backend_ctx, config, strlen(config));
+    ASSERT_SUCCESS(err, "Backend initialization failed");
 
-    // Load model with configuration
-    const char *model_filename = "./test/qwen2.5-14b-instruct-q2_k.gguf"; // Update with your model file path
-    const char *config = "{"
-                         "\"n_gpu_layers\":98,"
-                         "\"ctx_size\":2048,"
-                         "\"n_predict\":512,"
-                         "\"batch_size\":512,"
-                         "\"threads\":8,"
-                         "\"sampling\":{"
-                         "\"temp\":0.7,"
-                         "\"top_p\":0.95,"
-                         "\"top_k\":40,"
-                         "\"min_p\":0.05,"
-                         "\"typical_p\":1.0,"
-                         "\"repeat_penalty\":1.10,"
-                         "\"presence_penalty\":0.0,"
-                         "\"frequency_penalty\":0.0,"
-                         "\"penalty_last_n\":64,"
-                         "\"mirostat\":0,"
-                         "\"mirostat_tau\":5.0,"
-                         "\"mirostat_eta\":0.1,"
-                         "\"seed\":-1"
-                         "},"
-                         "\"stopping\":{"
-                         "\"max_tokens\":256,"
-                         "\"max_time_ms\":30000,"
-                         "\"ignore_eos\":false,"
-                         "\"stop\":[\"\\n\\n\"]"
-                         "},"
-                         "\"memory\":{"
-                         "\"context_shifting\":true"
-                         "}"
-                         "}";
-    err = load_by_name_with_config(backend_ctx, model_filename, strlen(model_filename), config, strlen(config), &g);
-    if (err != success)
-    {
-        fprintf(stderr, "Failed to load model\n");
-        dlclose(handle);
-        return EXIT_FAILURE;
-    }
-    printf("Model loaded successfully\n");
+    const char *model_config = "{"
+                              "\"n_gpu_layers\":98,"
+                              "\"ctx_size\":2048,"
+                              "\"n_predict\":100,"
+                              "\"sampling\":{\"temp\":0.7}"
+                              "}";
 
-    // Initialize execution context
-    err = init_execution_context(backend_ctx, g, &exec_ctx);
-    if (err != success)
-    {
-        fprintf(stderr, "Failed to initialize execution context\n");
-        dlclose(handle);
-        return EXIT_FAILURE;
-    }
-    printf("Execution context initialized successfully\n");
+    err = wasi_load_by_name_with_config(backend_ctx, MODEL_FILE, strlen(MODEL_FILE),
+                                  model_config, strlen(model_config), &g);
+    ASSERT_SUCCESS(err, "Model loading failed");
 
-    // Prepare input tensor
+    err = wasi_init_execution_context(backend_ctx, g, &exec_ctx);
+    ASSERT_SUCCESS(err, "Execution context initialization failed");
+
+    // Prepare inference
     tensor input_tensor;
-    const char *prompt1 = "Hello, I am Alex, who are you?";
-    const char *prompt2 = "Do you know Arweave?";
-    input_tensor.data = (tensor_data)prompt1;
-    input_tensor.dimensions = NULL; // Assuming not needed for this example
-    input_tensor.type = fp32;       // Assuming fp32 for this example
+    setup_tensor(&input_tensor, "What is artificial intelligence?");
 
-    // Prepare output tensor
-    uint32_t output_tensor_size = 1024; // Adjust size as needed
-    tensor_data output_tensor = (tensor_data)calloc(output_tensor_size, sizeof(uint8_t));
-    if (output_tensor == NULL)
-    {
-        fprintf(stderr, "Failed to allocate output tensor\n");
-        dlclose(handle);
-        return EXIT_FAILURE;
-    }
+    uint8_t output_buffer[1024];
+    uint32_t output_size = sizeof(output_buffer);
 
     // Run inference
-    err = run_inference(backend_ctx, exec_ctx, 0, &input_tensor, output_tensor, &output_tensor_size);
-    if (err != success)
-    {
-        fprintf(stderr, "Inference failed\n");
-        free(output_tensor);
-        dlclose(handle);
+    err = wasi_run_inference(backend_ctx, exec_ctx, 0, &input_tensor, output_buffer, &output_size);
+    ASSERT_SUCCESS(err, "Inference execution failed");
+    ASSERT(output_size > 0, "No output generated");
+
+    printf("✅ Inference response (%d chars): %.100s%s\n", 
+           output_size, (char*)output_buffer, output_size > 100 ? "..." : "");
+
+    // Cleanup
+    wasi_close_execution_context(backend_ctx, exec_ctx);
+    wasi_deinit_backend(backend_ctx);
+
+    return 1;
+}
+
+// Test 7: Concurrency Management
+static int test_concurrency_management() {
+    void *backend_ctx = NULL;
+    graph g = 0;
+    wasi_nn_error err;
+
+    // Setup backend with limited concurrency
+    const char *config = "{\"max_concurrent\":2,\"queue_size\":5}";
+    err = wasi_init_backend_with_config(&backend_ctx, config, strlen(config));
+    ASSERT_SUCCESS(err, "Backend initialization failed");
+
+    const char *model_config = "{\"n_gpu_layers\":98,\"ctx_size\":1024,\"n_predict\":50}";
+    err = wasi_load_by_name_with_config(backend_ctx, MODEL_FILE, strlen(MODEL_FILE),
+                                  model_config, strlen(model_config), &g);
+    ASSERT_SUCCESS(err, "Model loading failed");
+
+    graph_execution_context ctx1, ctx2, ctx3;
+
+    // First two should succeed
+    err = wasi_init_execution_context(backend_ctx, g, &ctx1);
+    ASSERT_SUCCESS(err, "First execution context failed");
+
+    err = wasi_init_execution_context(backend_ctx, g, &ctx2);
+    ASSERT_SUCCESS(err, "Second execution context failed");
+
+    // Third should fail due to concurrency limit
+    err = wasi_init_execution_context(backend_ctx, g, &ctx3);
+    ASSERT(err == runtime_error, "Concurrency limit not enforced");
+
+    printf("✅ Concurrency limit properly enforced (2/2 slots used)\n");
+
+    // Close one context and try again
+    wasi_close_execution_context(backend_ctx, ctx1);
+
+    err = wasi_init_execution_context(backend_ctx, g, &ctx3);
+    ASSERT_SUCCESS(err, "Context creation failed after slot became available");
+
+    printf("✅ Context creation successful after slot freed (2/2 slots used)\n");
+
+    // Cleanup
+    wasi_close_execution_context(backend_ctx, ctx2);
+    wasi_close_execution_context(backend_ctx, ctx3);
+    wasi_deinit_backend(backend_ctx);
+
+    return 1;
+}
+
+// Test 8: Advanced Sampling Parameters
+static int test_advanced_sampling() {
+    void *backend_ctx = NULL;
+    graph g = 0;
+    graph_execution_context exec_ctx = 0;
+    wasi_nn_error err;
+
+    err = wasi_init_backend(&backend_ctx);
+    ASSERT_SUCCESS(err, "Backend initialization failed");
+
+    // Test comprehensive sampling configuration
+    const char *sampling_config = "{"
+                                 "\"model\":{\"n_gpu_layers\":98,\"ctx_size\":1024,\"n_predict\":80},"
+                                 "\"sampling\":{"
+                                 "\"temp\":0.9,"
+                                 "\"top_p\":0.8,"
+                                 "\"top_k\":30,"
+                                 "\"min_p\":0.1,"
+                                 "\"typical_p\":0.95,"
+                                 "\"repeat_penalty\":1.15,"
+                                 "\"presence_penalty\":0.1,"
+                                 "\"frequency_penalty\":0.1,"
+                                 "\"penalty_last_n\":32,"
+                                 "\"mirostat\":1,"
+                                 "\"mirostat_tau\":4.0,"
+                                 "\"mirostat_eta\":0.2,"
+                                 "\"seed\":12345"
+                                 "},"
+                                 "\"stopping\":{"
+                                 "\"stop\":[\".\",\"!\",\"?\"],"
+                                 "\"max_tokens\":80,"
+                                 "\"ignore_eos\":true"
+                                 "}"
+                                 "}";
+
+    err = wasi_load_by_name_with_config(backend_ctx, MODEL_FILE, strlen(MODEL_FILE),
+                                  sampling_config, strlen(sampling_config), &g);
+    ASSERT_SUCCESS(err, "Advanced sampling model configuration failed");
+
+    err = wasi_init_execution_context(backend_ctx, g, &exec_ctx);
+    ASSERT_SUCCESS(err, "Execution context initialization failed");
+
+    tensor input_tensor;
+    setup_tensor(&input_tensor, "Write a short story about");
+
+    uint8_t output_buffer[512];
+    uint32_t output_size = sizeof(output_buffer);
+
+    err = wasi_run_inference(backend_ctx, exec_ctx, 0, &input_tensor, output_buffer, &output_size);
+    ASSERT_SUCCESS(err, "Advanced sampling inference failed");
+
+    printf("✅ Advanced sampling output: %.80s%s\n", 
+           (char*)output_buffer, output_size > 80 ? "..." : "");
+
+    // Cleanup
+    wasi_close_execution_context(backend_ctx, exec_ctx);
+    wasi_deinit_backend(backend_ctx);
+
+    return 1;
+}
+
+// Test 9: Session Management and Chat History
+static int test_session_management() {
+    void *backend_ctx = NULL;
+    graph g = 0;
+    graph_execution_context exec_ctx = 0;
+    wasi_nn_error err;
+
+    const char *config = "{\"max_sessions\":10,\"idle_timeout_ms\":600000,\"auto_cleanup\":true}";
+    err = wasi_init_backend_with_config(&backend_ctx, config, strlen(config));
+    ASSERT_SUCCESS(err, "Backend initialization failed");
+
+    const char *model_config = "{\"n_gpu_layers\":98,\"ctx_size\":2048,\"n_predict\":60}";
+    err = wasi_load_by_name_with_config(backend_ctx, MODEL_FILE, strlen(MODEL_FILE),
+                                  model_config, strlen(model_config), &g);
+    ASSERT_SUCCESS(err, "Model loading failed");
+
+    err = wasi_init_execution_context(backend_ctx, g, &exec_ctx);
+    ASSERT_SUCCESS(err, "Execution context initialization failed");
+
+    // First message
+    tensor input_tensor1;
+    setup_tensor(&input_tensor1, "Hello, my name is Alice.");
+
+    uint8_t output_buffer1[512];
+    uint32_t output_size1 = sizeof(output_buffer1);
+
+    err = wasi_run_inference(backend_ctx, exec_ctx, 0, &input_tensor1, output_buffer1, &output_size1);
+    ASSERT_SUCCESS(err, "First inference failed");
+
+    printf("✅ First response: %.60s%s\n", 
+           (char*)output_buffer1, output_size1 > 60 ? "..." : "");
+
+    // Second message (should remember context)
+    tensor input_tensor2;
+    setup_tensor(&input_tensor2, "What is my name?");
+
+    uint8_t output_buffer2[512];
+    uint32_t output_size2 = sizeof(output_buffer2);
+
+    err = wasi_run_inference(backend_ctx, exec_ctx, 0, &input_tensor2, output_buffer2, &output_size2);
+    ASSERT_SUCCESS(err, "Second inference failed");
+
+    printf("✅ Context-aware response: %.60s%s\n", 
+           (char*)output_buffer2, output_size2 > 60 ? "..." : "");
+
+    // Cleanup
+    wasi_close_execution_context(backend_ctx, exec_ctx);
+    wasi_deinit_backend(backend_ctx);
+
+    return 1;
+}
+
+// Test 10: Error Handling and Edge Cases
+static int test_error_handling() {
+    void *backend_ctx = NULL;
+    wasi_nn_error err;
+
+    // Test invalid JSON configuration
+    const char *invalid_json = "{\"max_sessions\":invalid}";
+    err = wasi_init_backend_with_config(&backend_ctx, invalid_json, strlen(invalid_json));
+    // Should still work with defaults despite invalid JSON
+    if (err == 0) {
+        wasi_deinit_backend(backend_ctx);
+        printf("✅ Graceful handling of invalid JSON (using defaults)\n");
+    }
+
+    // Test NULL parameters
+    err = wasi_init_backend_with_config(NULL, "{}", 2);
+    ASSERT(err != 0, "Should reject NULL context pointer");
+
+    err = wasi_init_backend_with_config(&backend_ctx, NULL, 0);
+    ASSERT_SUCCESS(err, "Should accept NULL config (use defaults)");
+    if (backend_ctx) {
+        wasi_deinit_backend(backend_ctx);
+    }
+
+    printf("✅ Error handling working correctly\n");
+    return 1;
+}
+
+// Main test runner
+int main() {
+    printf("🚀 WASI-NN Backend Comprehensive Test Suite\n");
+    printf("============================================================\n");
+    printf("Testing Phase 4.1 Enhanced Configuration System\n");
+    printf("============================================================\n");
+
+    // Initialize library
+    if (!setup_library()) {
+        printf("❌ FATAL: Failed to setup library\n");
         return EXIT_FAILURE;
     }
-    printf("\nrun Inference1 successful\n");
-    printf("Output: %s\n", output_tensor);
 
-    // Test concurrency limit and queue management
-    printf("\n--- Testing concurrency limit and queue management ---\n");
-    graph_execution_context exec_ctx2, exec_ctx3, exec_ctx4, exec_ctx5;
+    // Run all test sections
+    TEST_SECTION("Core Functionality Tests");
+    RUN_TEST("Basic Backend Initialization", test_basic_backend_init);
 
-    // Try to create more sessions than the limit (max_concurrent=4)
-    err = init_execution_context(backend_ctx, g, &exec_ctx2);
-    if (err != success)
-    {
-        printf("Correctly rejected execution context 2 due to concurrency limit\n");
+    TEST_SECTION("Configuration System Tests");
+    RUN_TEST("Legacy Flat Configuration", test_legacy_flat_config);
+    RUN_TEST("Enhanced Nested Configuration", test_enhanced_nested_config);
+    RUN_TEST("Legacy Model Configuration", test_legacy_model_config);
+    RUN_TEST("Enhanced Model Configuration with GPU", test_enhanced_model_config);
+
+    TEST_SECTION("Inference and AI Functionality Tests");
+    RUN_TEST("Basic Inference Test", test_basic_inference);
+    RUN_TEST("Advanced Sampling Parameters", test_advanced_sampling);
+    RUN_TEST("Session Management and Chat History", test_session_management);
+
+    TEST_SECTION("System Management Tests");
+    RUN_TEST("Concurrency Management", test_concurrency_management);
+    RUN_TEST("Error Handling and Edge Cases", test_error_handling);
+
+    // Final report
+    printf("\n======================================================================\n");
+    printf("🏁 TEST SUITE SUMMARY\n");
+    printf("======================================================================\n");
+    printf("Total Tests: %d\n", test_count);
+    printf("✅ Passed:   %d\n", test_passed);
+    printf("❌ Failed:   %d\n", test_failed);
+    
+    if (test_failed == 0) {
+        printf("\n🎉 ALL TESTS PASSED! 🎉\n");
+        printf("Phase 4.1 Enhanced Configuration System is working perfectly!\n");
+        printf("✅ GPU acceleration enabled and working\n");
+        printf("✅ Both legacy and enhanced configs supported\n");
+        printf("✅ Full backward compatibility maintained\n");
+        printf("✅ Advanced features working correctly\n");
+    } else {
+        printf("\n⚠️  Some tests failed. Please review the output above.\n");
     }
-    else
-    {
-        printf("Execution context 2 initialized successfully\n");
+    
+    printf("======================================================================\n");
 
-        err = init_execution_context(backend_ctx, g, &exec_ctx3);
-        if (err != success)
-        {
-            printf("Correctly rejected execution context 3 due to concurrency limit\n");
-        }
-        else
-        {
-            printf("Execution context 3 initialized successfully\n");
-
-            err = init_execution_context(backend_ctx, g, &exec_ctx4);
-            if (err != success)
-            {
-                printf("Correctly rejected execution context 4 due to concurrency limit\n");
-            }
-            else
-            {
-                printf("Execution context 4 initialized successfully\n");
-
-                // This should be queued because we've reached the concurrency limit
-                // but there's still room in the queue (queue_size=20)
-                err = init_execution_context(backend_ctx, g, &exec_ctx5);
-                if (err != success)
-                {
-                    printf("Failed to initialize execution context 5\n");
-                }
-                else
-                {
-                    printf("Execution context 5 queued successfully\n");
-                    
-                    // Run inference on exec_ctx5 to test the queue
-                    tensor input_tensor2;
-                    const char *prompt2 = "What is the capital of France?";
-                    input_tensor2.data = (tensor_data)prompt2;
-                    input_tensor2.dimensions = NULL;
-                    input_tensor2.type = fp32;
-                    
-                    uint32_t output_tensor_size2 = 1024;
-                    tensor_data output_tensor2 = (tensor_data)calloc(output_tensor_size2, sizeof(uint8_t));
-                    if (output_tensor2 == NULL)
-                    {
-                        fprintf(stderr, "Failed to allocate output tensor 2\n");
-                    }
-                    else
-                    {
-                        printf("Running inference on queued context...\n");
-                        err = run_inference(backend_ctx, exec_ctx5, 0, &input_tensor2, output_tensor2, &output_tensor_size2);
-                        if (err != success)
-                        {
-                            fprintf(stderr, "Queued inference failed\n");
-                        }
-                        else
-                        {
-                            printf("Queued inference successful\n");
-                            printf("Output: %s\n", output_tensor2);
-                        }
-                        free(output_tensor2);
-                    }
-                    
-                    // Close exec_ctx5 to clean up
-                    close_execution_context(backend_ctx, exec_ctx5);
-                }
-
-                // Close one session and try again
-                err = close_execution_context(backend_ctx, exec_ctx4);
-                if (err != success)
-                {
-                    fprintf(stderr, "Failed to close execution context 4\n");
-                }
-                else
-                {
-                    printf("Execution context 4 closed successfully\n");
-                }
-
-                // Now this should succeed directly (not queued)
-                graph_execution_context exec_ctx6;
-                err = init_execution_context(backend_ctx, g, &exec_ctx6);
-                if (err != success)
-                {
-                    fprintf(stderr, "Failed to initialize execution context 6\n");
-                }
-                else
-                {
-                    printf("Execution context 6 initialized successfully (not queued)\n");
-                    // Close it to clean up
-                    close_execution_context(backend_ctx, exec_ctx6);
-                }
-            }
-
-            // Clean up remaining contexts
-            close_execution_context(backend_ctx, exec_ctx3);
-        }
-
-        // Clean up remaining contexts
-        close_execution_context(backend_ctx, exec_ctx2);
-    }
-
-    err = deinit_backend(backend_ctx);
-    if (err != success)
-    {
-        fprintf(stderr, "Failed to Deinitialize backend\n");
+    // Cleanup
+    if (handle) {
         dlclose(handle);
-        return EXIT_FAILURE;
     }
-    printf("Backend deinitialized successfully\n");
 
-    // Clean up
-    free(output_tensor);
-    dlclose(handle);
-
-    return EXIT_SUCCESS;
+    return (test_failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

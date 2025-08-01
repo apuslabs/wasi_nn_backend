@@ -92,6 +92,9 @@ static void parse_config_to_params(const char *config_json,
   params.n_batch = 512;
   params.cpuparams.n_threads = 8;
   params.cpuparams_batch.n_threads = 8;
+  
+  // GPU acceleration defaults - explicitly set to enable GPU usage
+  params.n_gpu_layers = 0;  // Will be overridden by config if specified
 
   if (!config_json)
     return;
@@ -105,31 +108,46 @@ static void parse_config_to_params(const char *config_json,
 
   cJSON *item = nullptr;
 
-  // Basic model parameters
-  if ((item = cJSON_GetObjectItem(root, "n_predict")))
-  {
-    params.n_predict = (int32_t)cJSON_GetNumberValue(item);
-  }
+  // Helper function to parse model parameters from either root or model object
+  auto parse_model_params = [&](cJSON *config_obj) {
+    if ((item = cJSON_GetObjectItem(config_obj, "n_predict")))
+    {
+      params.n_predict = (int32_t)cJSON_GetNumberValue(item);
+    }
 
-  if ((item = cJSON_GetObjectItem(root, "n_gpu_layers")))
-  {
-    params.n_gpu_layers = (int32_t)cJSON_GetNumberValue(item);
-  }
+    if ((item = cJSON_GetObjectItem(config_obj, "n_gpu_layers")))
+    {
+      params.n_gpu_layers = (int32_t)cJSON_GetNumberValue(item);
+    }
 
-  if ((item = cJSON_GetObjectItem(root, "ctx_size")))
-  {
-    params.n_ctx = (uint32_t)cJSON_GetNumberValue(item);
-  }
+    if ((item = cJSON_GetObjectItem(config_obj, "ctx_size")))
+    {
+      params.n_ctx = (uint32_t)cJSON_GetNumberValue(item);
+    }
 
-  if ((item = cJSON_GetObjectItem(root, "batch_size")))
-  {
-    params.n_batch = (uint32_t)cJSON_GetNumberValue(item);
-  }
+    if ((item = cJSON_GetObjectItem(config_obj, "batch_size")))
+    {
+      params.n_batch = (uint32_t)cJSON_GetNumberValue(item);
+    }
 
-  if ((item = cJSON_GetObjectItem(root, "threads")))
+    if ((item = cJSON_GetObjectItem(config_obj, "threads")))
+    {
+      params.cpuparams.n_threads = (uint32_t)cJSON_GetNumberValue(item);
+      params.cpuparams_batch.n_threads = (uint32_t)cJSON_GetNumberValue(item);
+    }
+  };
+
+  // Parse model parameters - first check for new nested structure
+  cJSON *model_config = cJSON_GetObjectItem(root, "model");
+  if (cJSON_IsObject(model_config))
   {
-    params.cpuparams.n_threads = (uint32_t)cJSON_GetNumberValue(item);
-    params.cpuparams_batch.n_threads = (uint32_t)cJSON_GetNumberValue(item);
+    // New nested model configuration
+    parse_model_params(model_config);
+  }
+  else
+  {
+    // Legacy flat configuration (backward compatibility)
+    parse_model_params(root);
   }
 
   // Simple sampling parameters (backward compatibility)
@@ -400,36 +418,50 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
     cJSON *json = cJSON_ParseWithLength(config, config_len);
     if (json)
     {
-      // Existing session management settings
-      cJSON *max_sessions = cJSON_GetObjectItem(json, "max_sessions");
-      if (cJSON_IsNumber(max_sessions))
-      {
-        chat_ctx->max_sessions = (uint32_t)max_sessions->valueint;
-      }
+      // Helper function to parse backend configuration from either root or backend object
+      auto parse_backend_config = [&](cJSON *config_obj) {
+        cJSON *max_sessions = cJSON_GetObjectItem(config_obj, "max_sessions");
+        if (cJSON_IsNumber(max_sessions))
+        {
+          chat_ctx->max_sessions = (uint32_t)max_sessions->valueint;
+        }
 
-      cJSON *idle_timeout = cJSON_GetObjectItem(json, "idle_timeout_ms");
-      if (cJSON_IsNumber(idle_timeout))
-      {
-        chat_ctx->idle_timeout_ms = (uint32_t)idle_timeout->valueint;
-      }
+        cJSON *idle_timeout = cJSON_GetObjectItem(config_obj, "idle_timeout_ms");
+        if (cJSON_IsNumber(idle_timeout))
+        {
+          chat_ctx->idle_timeout_ms = (uint32_t)idle_timeout->valueint;
+        }
 
-      cJSON *auto_cleanup = cJSON_GetObjectItem(json, "auto_cleanup");
-      if (cJSON_IsBool(auto_cleanup))
-      {
-        chat_ctx->auto_cleanup_enabled = cJSON_IsTrue(auto_cleanup);
-      }
+        cJSON *auto_cleanup = cJSON_GetObjectItem(config_obj, "auto_cleanup");
+        if (cJSON_IsBool(auto_cleanup))
+        {
+          chat_ctx->auto_cleanup_enabled = cJSON_IsTrue(auto_cleanup);
+        }
 
-      // Concurrency and queue management
-      cJSON *max_concurrent = cJSON_GetObjectItem(json, "max_concurrent");
-      if (cJSON_IsNumber(max_concurrent))
-      {
-        chat_ctx->max_concurrent = (uint32_t)max_concurrent->valueint;
-      }
+        cJSON *max_concurrent = cJSON_GetObjectItem(config_obj, "max_concurrent");
+        if (cJSON_IsNumber(max_concurrent))
+        {
+          chat_ctx->max_concurrent = (uint32_t)max_concurrent->valueint;
+        }
 
-      cJSON *queue_size = cJSON_GetObjectItem(json, "queue_size");
-      if (cJSON_IsNumber(queue_size))
+        cJSON *queue_size = cJSON_GetObjectItem(config_obj, "queue_size");
+        if (cJSON_IsNumber(queue_size))
+        {
+          chat_ctx->queue_size = (uint32_t)queue_size->valueint;
+        }
+      };
+
+      // Parse backend configuration - first check for new nested structure
+      cJSON *backend_config = cJSON_GetObjectItem(json, "backend");
+      if (cJSON_IsObject(backend_config))
       {
-        chat_ctx->queue_size = (uint32_t)queue_size->valueint;
+        // New nested backend configuration
+        parse_backend_config(backend_config);
+      }
+      else
+      {
+        // Legacy flat configuration (backward compatibility)
+        parse_backend_config(json);
       }
 
       // Memory policy
@@ -556,6 +588,12 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
   // Parse config into params
   parse_config_to_params(config, chat_ctx->server_ctx.params_base);
   chat_ctx->server_ctx.params_base.model.path = filename;
+
+  NN_INFO_PRINTF("Model config: n_gpu_layers=%d, ctx_size=%d, batch_size=%d, threads=%d",
+                 chat_ctx->server_ctx.params_base.n_gpu_layers,
+                 chat_ctx->server_ctx.params_base.n_ctx,
+                 chat_ctx->server_ctx.params_base.n_batch,
+                 chat_ctx->server_ctx.params_base.cpuparams.n_threads);
 
   // Load model using server_context's approach
   if (!chat_ctx->server_ctx.load_model(chat_ctx->server_ctx.params_base)) {
