@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
 
-#include "wasi_nn_llama.h"
+#include "../include/wasi_nn_llama.h"
 #include "cJSON.h"
 #include "utils/logger.h"
 

@@ -3,15 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
 
- #ifndef WASI_NN_TYPES_H
- #define WASI_NN_TYPES_H
- 
+#ifndef WASI_NN_LLAMA_H
+#define WASI_NN_LLAMA_H
+
 #include <stdint.h>
 #include <stdbool.h>
 
- #ifdef __cplusplus
- extern "C" {
- #endif
+#ifdef __cplusplus
+extern "C" {
+#endif
  
  /**
   * ERRORS
@@ -174,6 +174,16 @@
  __attribute__((visibility("default"))) wasi_nn_error
  run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
 		   tensor *input_tensor,tensor_data output_tensor, uint32_t *output_tensor_size);
+
+ // Additional API functions
+ __attribute__((visibility("default"))) wasi_nn_error
+ init_backend_with_config(void **ctx, const char *config, uint32_t config_len);
+
+ __attribute__((visibility("default"))) wasi_nn_error
+ load_by_name(void *ctx, const char *filename, uint32_t filename_len, graph *g);
+
+ __attribute__((visibility("default"))) wasi_nn_error
+ close_execution_context(void *ctx, graph_execution_context exec_ctx);
  
  #ifdef __cplusplus
  }
