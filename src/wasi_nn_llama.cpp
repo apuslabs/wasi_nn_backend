@@ -26,6 +26,39 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <deque>
+#include <thread>
+#include <condition_variable>
+
+// Task priority levels for WASI-NN backend
+enum wasi_nn_task_priority
+{
+  WASI_NN_PRIORITY_LOW = 0,
+  WASI_NN_PRIORITY_NORMAL = 1,
+  WASI_NN_PRIORITY_HIGH = 2,
+  WASI_NN_PRIORITY_URGENT = 3
+};
+
+// Enhanced task structure for WASI-NN backend
+struct wasi_nn_task
+{
+  int id = -1;
+  graph_execution_context exec_ctx;
+  wasi_nn_task_priority priority = WASI_NN_PRIORITY_NORMAL;
+  std::chrono::steady_clock::time_point created_at;
+  std::chrono::steady_clock::time_point timeout_at;
+  uint32_t timeout_ms = 30000; // Default 30 second timeout
+  std::string prompt;
+  bool is_queued = false;
+  
+  wasi_nn_task() : created_at(std::chrono::steady_clock::now()) 
+  {
+    timeout_at = created_at + std::chrono::milliseconds(timeout_ms);
+  }
+};
+
+// Forward declaration for task queue
+struct wasi_nn_task_queue;
 
 struct SessionInfo
 {
@@ -48,10 +81,25 @@ struct LlamaChatContext
   uint32_t idle_timeout_ms;
   bool auto_cleanup_enabled;
 
-  // Concurrency and queue management
+  // Enhanced concurrency and task management (Phase 4.2)
   uint32_t max_concurrent;
   uint32_t queue_size;
   uint32_t active_sessions; // Track active sessions
+  
+  // Advanced task queue system
+  std::shared_ptr<wasi_nn_task_queue> task_queue;
+  std::thread task_processor_thread;
+  bool task_processing_enabled = true;
+  
+  // Task timeout and priority settings
+  uint32_t default_task_timeout_ms = 30000;
+  bool priority_scheduling_enabled = true;
+  bool fair_scheduling_enabled = true;
+  
+  // Queue monitoring and limits
+  uint32_t queue_warning_threshold = 40;    // Warn when queue is 80% full
+  uint32_t queue_reject_threshold = 50;     // Reject when queue is 100% full
+  bool auto_queue_cleanup = true;
 
   // Memory policy
   bool context_shifting_enabled;
@@ -74,7 +122,175 @@ struct LlamaChatContext
         context_shifting_enabled(true), cache_strategy("lru"), max_cache_tokens(10000),
         log_level("info"), enable_debug_log(false),
         batch_processing_enabled(true), batch_size(512) {}
+  
+  // Destructor will be defined after wasi_nn_task_queue definition
+  ~LlamaChatContext();
 };
+
+// Task queue with priority management
+struct wasi_nn_task_queue
+{
+  std::deque<wasi_nn_task> high_priority_queue;    // Priority 3 (urgent)
+  std::deque<wasi_nn_task> normal_priority_queue;  // Priority 1-2 (normal/high)
+  std::deque<wasi_nn_task> low_priority_queue;     // Priority 0 (low)
+  
+  std::mutex queue_mutex;
+  std::condition_variable queue_condition;
+  
+  uint32_t max_queue_size = 50;
+  uint32_t current_size = 0;
+  bool running = true;
+  int next_task_id = 1;
+  
+  // Queue statistics
+  uint32_t tasks_queued = 0;
+  uint32_t tasks_completed = 0;
+  uint32_t tasks_timeout = 0;
+  uint32_t tasks_rejected = 0;
+  
+  // Add task to appropriate priority queue
+  bool enqueue_task(wasi_nn_task &&task);
+  
+  // Get next task based on priority
+  bool dequeue_task(wasi_nn_task &task);
+  
+  // Clean up expired tasks
+  void cleanup_expired_tasks();
+  
+  // Get queue status
+  void get_queue_status(uint32_t &queued, uint32_t &active, uint32_t &capacity);
+};
+
+// Implementation of LlamaChatContext destructor
+LlamaChatContext::~LlamaChatContext() {
+  // Cleanup task processing thread
+  if (task_processing_enabled && task_processor_thread.joinable()) {
+    if (task_queue) {
+      task_queue->running = false;
+      task_queue->queue_condition.notify_all();
+    }
+    task_processor_thread.join();
+  }
+}
+
+// Implementation of wasi_nn_task_queue methods
+bool wasi_nn_task_queue::enqueue_task(wasi_nn_task &&task)
+{
+  std::unique_lock<std::mutex> lock(queue_mutex);
+  
+  // Check if queue is at capacity
+  if (current_size >= max_queue_size) {
+    tasks_rejected++;
+    NN_WARN_PRINTF("Task queue full (%d/%d), rejecting task %d", 
+                   current_size, max_queue_size, task.id);
+    return false;
+  }
+  
+  // Assign task ID if not set
+  if (task.id == -1) {
+    task.id = next_task_id++;
+  }
+  
+  // Add to appropriate priority queue
+  switch (task.priority) {
+    case WASI_NN_PRIORITY_URGENT:
+      high_priority_queue.push_back(std::move(task));
+      break;
+    case WASI_NN_PRIORITY_HIGH:
+    case WASI_NN_PRIORITY_NORMAL:
+      normal_priority_queue.push_back(std::move(task));
+      break;
+    case WASI_NN_PRIORITY_LOW:
+    default:
+      low_priority_queue.push_back(std::move(task));
+      break;
+  }
+  
+  current_size++;
+  tasks_queued++;
+  
+  NN_INFO_PRINTF("Task %d queued with priority %d. Queue size: %d/%d", 
+                 task.id, (int)task.priority, current_size, max_queue_size);
+  
+  // Notify waiting threads
+  queue_condition.notify_one();
+  return true;
+}
+
+bool wasi_nn_task_queue::dequeue_task(wasi_nn_task &task)
+{
+  std::unique_lock<std::mutex> lock(queue_mutex);
+  
+  // Wait for tasks to become available
+  queue_condition.wait(lock, [this] { 
+    return !running || 
+           !high_priority_queue.empty() || 
+           !normal_priority_queue.empty() || 
+           !low_priority_queue.empty(); 
+  });
+  
+  if (!running) {
+    return false;
+  }
+  
+  // Clean up expired tasks first
+  cleanup_expired_tasks();
+  
+  // Dequeue from highest priority queue first
+  if (!high_priority_queue.empty()) {
+    task = std::move(high_priority_queue.front());
+    high_priority_queue.pop_front();
+  } else if (!normal_priority_queue.empty()) {
+    task = std::move(normal_priority_queue.front());
+    normal_priority_queue.pop_front();
+  } else if (!low_priority_queue.empty()) {
+    task = std::move(low_priority_queue.front());
+    low_priority_queue.pop_front();
+  } else {
+    return false; // No tasks available
+  }
+  
+  current_size--;
+  NN_INFO_PRINTF("Dequeued task %d with priority %d. Queue size: %d/%d",
+                 task.id, (int)task.priority, current_size, max_queue_size);
+  
+  return true;
+}
+
+void wasi_nn_task_queue::cleanup_expired_tasks()
+{
+  // Note: This method assumes the queue_mutex is already locked
+  auto now = std::chrono::steady_clock::now();
+  
+  auto cleanup_queue = [&](std::deque<wasi_nn_task> &queue) {
+    auto it = queue.begin();
+    while (it != queue.end()) {
+      if (now > it->timeout_at) {
+        NN_WARN_PRINTF("Task %d expired (created %ldms ago)", 
+                       it->id,
+                       std::chrono::duration_cast<std::chrono::milliseconds>(
+                         now - it->created_at).count());
+        it = queue.erase(it);
+        current_size--;
+        tasks_timeout++;
+      } else {
+        ++it;
+      }
+    }
+  };
+  
+  cleanup_queue(high_priority_queue);
+  cleanup_queue(normal_priority_queue);
+  cleanup_queue(low_priority_queue);
+}
+
+void wasi_nn_task_queue::get_queue_status(uint32_t &queued, uint32_t &active, uint32_t &capacity)
+{
+  std::unique_lock<std::mutex> lock(queue_mutex);
+  queued = current_size;
+  active = tasks_queued - tasks_completed - tasks_timeout - tasks_rejected;
+  capacity = max_queue_size;
+}
 
 // Helper function to parse JSON config into common_params
 static void parse_config_to_params(const char *config_json,
@@ -449,6 +665,43 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
         {
           chat_ctx->queue_size = (uint32_t)queue_size->valueint;
         }
+        
+        // Enhanced task queue settings (Phase 4.2)
+        cJSON *default_task_timeout = cJSON_GetObjectItem(config_obj, "default_task_timeout_ms");
+        if (cJSON_IsNumber(default_task_timeout))
+        {
+          chat_ctx->default_task_timeout_ms = (uint32_t)default_task_timeout->valueint;
+        }
+        
+        cJSON *priority_scheduling = cJSON_GetObjectItem(config_obj, "priority_scheduling_enabled");
+        if (cJSON_IsBool(priority_scheduling))
+        {
+          chat_ctx->priority_scheduling_enabled = cJSON_IsTrue(priority_scheduling);
+        }
+        
+        cJSON *fair_scheduling = cJSON_GetObjectItem(config_obj, "fair_scheduling_enabled");
+        if (cJSON_IsBool(fair_scheduling))
+        {
+          chat_ctx->fair_scheduling_enabled = cJSON_IsTrue(fair_scheduling);
+        }
+        
+        cJSON *queue_warning_threshold = cJSON_GetObjectItem(config_obj, "queue_warning_threshold");
+        if (cJSON_IsNumber(queue_warning_threshold))
+        {
+          chat_ctx->queue_warning_threshold = (uint32_t)queue_warning_threshold->valueint;
+        }
+        
+        cJSON *queue_reject_threshold = cJSON_GetObjectItem(config_obj, "queue_reject_threshold");
+        if (cJSON_IsNumber(queue_reject_threshold))
+        {
+          chat_ctx->queue_reject_threshold = (uint32_t)queue_reject_threshold->valueint;
+        }
+        
+        cJSON *auto_queue_cleanup = cJSON_GetObjectItem(config_obj, "auto_queue_cleanup");
+        if (cJSON_IsBool(auto_queue_cleanup))
+        {
+          chat_ctx->auto_queue_cleanup = cJSON_IsTrue(auto_queue_cleanup);
+        }
       };
 
       // Parse backend configuration - first check for new nested structure
@@ -535,6 +788,37 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
   llama_backend_init();
   llama_numa_init(GGML_NUMA_STRATEGY_DISABLED);
 
+  // Initialize task queue system (Phase 4.2)
+  chat_ctx->task_queue = std::make_shared<wasi_nn_task_queue>();
+  chat_ctx->task_queue->max_queue_size = chat_ctx->queue_size;
+  
+  // Start task processing thread if enabled
+  if (chat_ctx->task_processing_enabled) {
+    chat_ctx->task_processor_thread = std::thread([chat_ctx]() {
+      NN_INFO_PRINTF("Task processor thread started");
+      
+      wasi_nn_task task;
+      while (chat_ctx->task_queue->running) {
+        if (chat_ctx->task_queue->dequeue_task(task)) {
+          // Process the task
+          NN_INFO_PRINTF("Processing task %d for execution context %d", 
+                         task.id, task.exec_ctx);
+          
+          // For now, just mark as completed
+          // In a full implementation, this would trigger actual inference
+          {
+            std::unique_lock<std::mutex> lock(chat_ctx->task_queue->queue_mutex);
+            chat_ctx->task_queue->tasks_completed++;
+          }
+          
+          NN_INFO_PRINTF("Task %d completed", task.id);
+        }
+      }
+      
+      NN_INFO_PRINTF("Task processor thread terminated");
+    });
+  }
+
   NN_INFO_PRINTF("Llama chat backend initialized successfully");
   NN_INFO_PRINTF(
       "Session config: max_sessions=%d, idle_timeout_ms=%d, auto_cleanup=%s",
@@ -543,6 +827,11 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
   NN_INFO_PRINTF(
       "Concurrency config: max_concurrent=%d, queue_size=%d",
       chat_ctx->max_concurrent, chat_ctx->queue_size);
+  NN_INFO_PRINTF(
+      "Task Queue config: timeout=%dms, priority_scheduling=%s, fair_scheduling=%s",
+      chat_ctx->default_task_timeout_ms,
+      chat_ctx->priority_scheduling_enabled ? "true" : "false",
+      chat_ctx->fair_scheduling_enabled ? "true" : "false");
   NN_INFO_PRINTF(
       "Memory config: context_shifting=%s, cache_strategy=%s, max_cache_tokens=%d",
       chat_ctx->context_shifting_enabled ? "true" : "false",
@@ -932,12 +1221,101 @@ __attribute__((visibility("default"))) wasi_nn_error
 set_input(void *ctx, graph_execution_context exec_ctx, uint32_t index,
           tensor *wasi_nn_tensor)
 {
+  LlamaChatContext *chat_ctx = (LlamaChatContext *)ctx;
+  if (!chat_ctx || !wasi_nn_tensor)
+    return invalid_argument;
+
+  // Find the session
+  auto session_it = chat_ctx->sessions.find(exec_ctx);
+  if (session_it == chat_ctx->sessions.end())
+    return invalid_argument;
+
+  // Get the input prompt from tensor data
+  const char *prompt_str = (const char *)wasi_nn_tensor->data;
+  if (!prompt_str)
+    return invalid_argument;
+
+  // Calculate tensor size from dimensions
+  uint32_t tensor_size = 1;
+  if (wasi_nn_tensor->dimensions && wasi_nn_tensor->dimensions->buf) {
+    for (uint32_t i = 0; i < wasi_nn_tensor->dimensions->size; ++i) {
+      tensor_size *= wasi_nn_tensor->dimensions->buf[i];
+    }
+  }
+  
+  // For text data, we assume it's null-terminated or use a reasonable max length
+  size_t prompt_len = strnlen(prompt_str, tensor_size);
+  std::string prompt(prompt_str, prompt_len);
+  
+  // Store the prompt for later processing in compute()
+  // For now, we'll store it in the session (could be optimized)
+  session_it->second.session_id = prompt; // Temporary storage
+  
+  NN_INFO_PRINTF("Input set for execution context %d: %.100s%s", 
+                 exec_ctx, prompt.c_str(), 
+                 prompt.length() > 100 ? "..." : "");
+
   return success;
 }
 
 __attribute__((visibility("default"))) wasi_nn_error
 compute(void *ctx, graph_execution_context exec_ctx)
 {
+  LlamaChatContext *chat_ctx = (LlamaChatContext *)ctx;
+  if (!chat_ctx)
+    return invalid_argument;
+
+  // Find the session
+  auto session_it = chat_ctx->sessions.find(exec_ctx);
+  if (session_it == chat_ctx->sessions.end())
+    return invalid_argument;
+
+  // Check if we're at capacity - if so, queue the task
+  if (chat_ctx->active_sessions >= chat_ctx->max_concurrent)
+  {
+    if (!chat_ctx->task_queue)
+    {
+      NN_WARN_PRINTF("Task queue not initialized but needed for queuing");
+      return runtime_error;
+    }
+    
+    // Create a task for queuing
+    wasi_nn_task task;
+    task.exec_ctx = exec_ctx;
+    task.prompt = session_it->second.session_id; // Retrieved from set_input
+    task.timeout_ms = chat_ctx->default_task_timeout_ms;
+    task.timeout_at = task.created_at + std::chrono::milliseconds(task.timeout_ms);
+    task.is_queued = true;
+    
+    // Determine priority (for now, all tasks are normal priority)
+    // In a real implementation, this could be based on user settings or prompt analysis
+    task.priority = WASI_NN_PRIORITY_NORMAL;
+    
+    // Try to enqueue the task
+    if (!chat_ctx->task_queue->enqueue_task(std::move(task)))
+    {
+      NN_WARN_PRINTF("Failed to enqueue task for execution context %d - queue full", exec_ctx);
+      return runtime_error;
+    }
+    
+    NN_INFO_PRINTF("Task queued for execution context %d due to capacity limits (%d/%d active)", 
+                   exec_ctx, chat_ctx->active_sessions, chat_ctx->max_concurrent);
+    return success;
+  }
+  
+  // If we have capacity, process immediately
+  NN_INFO_PRINTF("Processing compute request immediately for execution context %d", exec_ctx);
+  
+  // Update last activity time
+  session_it->second.last_activity = std::chrono::steady_clock::now();
+  
+  // For Phase 4.2, we're mainly implementing the queuing mechanism
+  // The actual inference processing remains the same as before
+  // This would typically involve:
+  // 1. Creating server tasks
+  // 2. Processing through the server context
+  // 3. Managing the llama context and sampling
+  
   return success;
 }
 
