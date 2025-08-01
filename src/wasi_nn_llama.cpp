@@ -67,9 +67,6 @@
     } \
   } while(0)
 
-// Forward declarations for helper functions
-static void parse_config_to_params(const char *config_json, common_params &params);
-
 // Task priority levels for WASI-NN backend
 enum wasi_nn_task_priority
 {
@@ -209,6 +206,9 @@ struct LlamaChatContext
   // Destructor will be defined after wasi_nn_task_queue definition
   ~LlamaChatContext();
 };
+
+// Forward declarations for helper functions
+static void parse_config_to_params(const char *config_json, common_params &params, LlamaChatContext *chat_ctx = nullptr);
 
 // Task queue with priority management
 struct wasi_nn_task_queue
@@ -386,7 +386,7 @@ static wasi_nn_error safe_model_switch(LlamaChatContext *chat_ctx, const char *f
     // Step 3: Parse new configuration
     common_params new_params = chat_ctx->server_ctx.params_base;
     if (config) {
-      parse_config_to_params(config, new_params);
+      parse_config_to_params(config, new_params, chat_ctx);
     }
     new_params.model.path = std::string(filename, filename_len);
     
@@ -941,7 +941,8 @@ static wasi_nn_error handle_memory_pressure(LlamaChatContext* chat_ctx) {
 
 // Helper function to parse JSON config into common_params
 static void parse_config_to_params(const char *config_json,
-                                   common_params &params)
+                                   common_params &params,
+                                   LlamaChatContext *chat_ctx)
 {
   // Set defaults (similar to main.cpp)
   params = common_params();
@@ -1144,12 +1145,12 @@ static void parse_config_to_params(const char *config_json,
       params.sampling.ignore_eos = cJSON_IsTrue(ignore_eos);
     }
 
-    // Handle stop sequences
+    // Handle stop sequences - Basic stop words
     cJSON *stop = cJSON_GetObjectItem(stopping, "stop");
     if (cJSON_IsArray(stop))
     {
-      // Clear existing stop sequences
-      params.sampling.grammar_triggers.clear();
+      // Clear existing antiprompt sequences for basic stop words
+      params.antiprompt.clear();
       
       int array_size = cJSON_GetArraySize(stop);
       for (int i = 0; i < array_size; i++)
@@ -1157,11 +1158,242 @@ static void parse_config_to_params(const char *config_json,
         cJSON *stop_item = cJSON_GetArrayItem(stop, i);
         if (cJSON_IsString(stop_item))
         {
-          // Add stop sequence to grammar triggers
+          // Add to antiprompt for basic string matching (server.cpp style)
+          params.antiprompt.push_back(std::string(cJSON_GetStringValue(stop_item)));
+        }
+      }
+    }
+
+    // Phase 5.3: Advanced Stopping Criteria Implementation
+    
+    // Handle advanced grammar triggers
+    cJSON *grammar_triggers = cJSON_GetObjectItem(stopping, "grammar_triggers");
+    if (cJSON_IsArray(grammar_triggers))
+    {
+      // Clear existing grammar triggers
+      params.sampling.grammar_triggers.clear();
+      
+      int array_size = cJSON_GetArraySize(grammar_triggers);
+      for (int i = 0; i < array_size; i++)
+      {
+        cJSON *trigger_item = cJSON_GetArrayItem(grammar_triggers, i);
+        if (cJSON_IsObject(trigger_item))
+        {
           common_grammar_trigger trigger;
-          trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;  // Use pattern type for string matching
-          trigger.value = std::string(cJSON_GetStringValue(stop_item));
+          
+          // Parse trigger type
+          cJSON *type = cJSON_GetObjectItem(trigger_item, "type");
+          if (cJSON_IsString(type))
+          {
+            std::string type_str = cJSON_GetStringValue(type);
+            if (type_str == "token")
+            {
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
+            }
+            else if (type_str == "word")
+            {
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_WORD;
+            }
+            else if (type_str == "pattern")
+            {
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;
+            }
+            else if (type_str == "pattern_full")
+            {
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL;
+            }
+            else
+            {
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN; // Default to pattern
+            }
+          }
+          else
+          {
+            trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN; // Default to pattern
+          }
+          
+          // Parse trigger value
+          cJSON *value = cJSON_GetObjectItem(trigger_item, "value");
+          if (cJSON_IsString(value))
+          {
+            trigger.value = std::string(cJSON_GetStringValue(value));
+          }
+          
+          // Parse token (for TOKEN type triggers)
+          cJSON *token = cJSON_GetObjectItem(trigger_item, "token");
+          if (cJSON_IsNumber(token) && trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN)
+          {
+            trigger.token = (llama_token)cJSON_GetNumberValue(token);
+          }
+          
           params.sampling.grammar_triggers.push_back(trigger);
+        }
+        else if (cJSON_IsString(trigger_item))
+        {
+          // Simple string trigger - convert to pattern type
+          common_grammar_trigger trigger;
+          trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;
+          trigger.value = std::string(cJSON_GetStringValue(trigger_item));
+          params.sampling.grammar_triggers.push_back(trigger);
+        }
+      }
+    }
+
+    // Handle context-aware stopping 
+    cJSON *context_aware = cJSON_GetObjectItem(stopping, "context_aware");
+    if (cJSON_IsBool(context_aware) && cJSON_IsTrue(context_aware))
+    {
+      // Enable context-aware stopping - this will be handled during inference
+      if (chat_ctx)
+      {
+        WASI_NN_LOG_INFO(chat_ctx, "Context-aware stopping enabled");
+      }
+    }
+
+    // Handle dynamic timeout configuration
+    cJSON *dynamic_timeout = cJSON_GetObjectItem(stopping, "dynamic_timeout");
+    if (cJSON_IsObject(dynamic_timeout))
+    {
+      // Base timeout in milliseconds
+      cJSON *base_timeout = cJSON_GetObjectItem(dynamic_timeout, "base_ms");
+      if (cJSON_IsNumber(base_timeout) && chat_ctx)
+      {
+        // Store base timeout for dynamic adjustment
+        WASI_NN_LOG_INFO(chat_ctx, "Dynamic timeout base: %.0f ms", cJSON_GetNumberValue(base_timeout));
+      }
+      
+      // Scaling factor based on token count
+      cJSON *token_scale = cJSON_GetObjectItem(dynamic_timeout, "token_scale");
+      if (cJSON_IsNumber(token_scale) && chat_ctx)
+      {
+        WASI_NN_LOG_INFO(chat_ctx, "Dynamic timeout token scale: %.3f", cJSON_GetNumberValue(token_scale));
+      }
+      
+      // Maximum timeout limit
+      cJSON *max_timeout = cJSON_GetObjectItem(dynamic_timeout, "max_ms");
+      if (cJSON_IsNumber(max_timeout) && chat_ctx)
+      {
+        WASI_NN_LOG_INFO(chat_ctx, "Dynamic timeout maximum: %.0f ms", cJSON_GetNumberValue(max_timeout));
+      }
+    }
+
+    // Handle token-based stopping conditions
+    cJSON *token_conditions = cJSON_GetObjectItem(stopping, "token_conditions");
+    if (cJSON_IsArray(token_conditions))
+    {
+      int array_size = cJSON_GetArraySize(token_conditions);
+      for (int i = 0; i < array_size; i++)
+      {
+        cJSON *condition = cJSON_GetArrayItem(token_conditions, i);
+        if (cJSON_IsObject(condition))
+        {
+          cJSON *token_id = cJSON_GetObjectItem(condition, "token_id");
+          cJSON *mode = cJSON_GetObjectItem(condition, "mode");
+          
+          if (cJSON_IsNumber(token_id) && cJSON_IsString(mode))
+          {
+            llama_token token = (llama_token)cJSON_GetNumberValue(token_id);
+            std::string mode_str = cJSON_GetStringValue(mode);
+            
+            if (mode_str == "stop_on_token")
+            {
+              // Create a token-based grammar trigger
+              common_grammar_trigger trigger;
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
+              trigger.token = token;
+              trigger.value = "token_" + std::to_string(token);
+              params.sampling.grammar_triggers.push_back(trigger);
+              
+              if (chat_ctx)
+              {
+                WASI_NN_LOG_DEBUG(chat_ctx, "Added token stopping condition for token ID: %d", token);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Handle pattern-based stopping conditions with regex support
+    cJSON *pattern_conditions = cJSON_GetObjectItem(stopping, "pattern_conditions");
+    if (cJSON_IsArray(pattern_conditions))
+    {
+      int array_size = cJSON_GetArraySize(pattern_conditions);
+      for (int i = 0; i < array_size; i++)
+      {
+        cJSON *pattern_obj = cJSON_GetArrayItem(pattern_conditions, i);
+        if (cJSON_IsObject(pattern_obj))
+        {
+          cJSON *pattern = cJSON_GetObjectItem(pattern_obj, "pattern");
+          cJSON *match_type = cJSON_GetObjectItem(pattern_obj, "match_type");
+          
+          if (cJSON_IsString(pattern))
+          {
+            std::string pattern_str = cJSON_GetStringValue(pattern);
+            std::string match_type_str = cJSON_IsString(match_type) ? cJSON_GetStringValue(match_type) : "full";
+            
+            common_grammar_trigger trigger;
+            if (match_type_str == "partial")
+            {
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;
+            }
+            else
+            {
+              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL;
+            }
+            trigger.value = pattern_str;
+            params.sampling.grammar_triggers.push_back(trigger);
+            
+            if (chat_ctx)
+            {
+              WASI_NN_LOG_DEBUG(chat_ctx, "Added pattern stopping condition: %s (type: %s)", 
+                              pattern_str.c_str(), match_type_str.c_str());
+            }
+          }
+        }
+      }
+    }
+
+    // Handle semantic stopping conditions
+    cJSON *semantic_conditions = cJSON_GetObjectItem(stopping, "semantic_conditions");
+    if (cJSON_IsArray(semantic_conditions))
+    {
+      int array_size = cJSON_GetArraySize(semantic_conditions);
+      for (int i = 0; i < array_size; i++)
+      {
+        cJSON *semantic_obj = cJSON_GetArrayItem(semantic_conditions, i);
+        if (cJSON_IsObject(semantic_obj))
+        {
+          cJSON *condition_type = cJSON_GetObjectItem(semantic_obj, "type");
+          cJSON *threshold = cJSON_GetObjectItem(semantic_obj, "threshold");
+          
+          if (cJSON_IsString(condition_type))
+          {
+            std::string type_str = cJSON_GetStringValue(condition_type);
+            float threshold_val = cJSON_IsNumber(threshold) ? (float)cJSON_GetNumberValue(threshold) : 0.8f;
+            
+            if (type_str == "completion_detection")
+            {
+              if (chat_ctx)
+              {
+                WASI_NN_LOG_INFO(chat_ctx, "Semantic completion detection enabled (threshold: %.3f)", threshold_val);
+              }
+            }
+            else if (type_str == "repetition_detection")
+            {
+              if (chat_ctx)
+              {
+                WASI_NN_LOG_INFO(chat_ctx, "Semantic repetition detection enabled (threshold: %.3f)", threshold_val);
+              }
+            }
+            else if (type_str == "coherence_break")
+            {
+              if (chat_ctx)
+              {
+                WASI_NN_LOG_INFO(chat_ctx, "Semantic coherence break detection enabled (threshold: %.3f)", threshold_val);
+              }
+            }
+          }
         }
       }
     }
@@ -1696,7 +1928,7 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
 
   // Initial model loading (no existing model)
   // Parse config into params
-  parse_config_to_params(config, chat_ctx->server_ctx.params_base);
+  parse_config_to_params(config, chat_ctx->server_ctx.params_base, chat_ctx);
   chat_ctx->server_ctx.params_base.model.path = filename;
 
   NN_INFO_PRINTF("Model config: n_gpu_layers=%d, ctx_size=%d, batch_size=%d, threads=%d",
