@@ -11,10 +11,13 @@
 #include "arg.h"
 #include "chat.h"
 #include "common.h"
-#include "console.h"
 #include "llama.h"
 #include "log.h"
 #include "sampling.h"
+
+// Include all server types and structures directly from server.cpp
+// We need the complete definitions, not just forward declarations
+#include "server/server.cpp"
 
 #include <algorithm>
 #include <chrono>
@@ -33,18 +36,8 @@ struct SessionInfo
 
 struct LlamaChatContext
 {
-  // Core llama.cpp objects (from main.cpp)
-  llama_model *model;
-  llama_context *ctx;
-  common_sampler *smpl;
-  const llama_vocab *vocab;
-
-  // Threading (from main.cpp)
-  ggml_threadpool *threadpool;
-  ggml_threadpool *threadpool_batch;
-
-  // Chat management (from main.cpp)
-  common_chat_templates_ptr chat_templates;
+  // Server context (from server.cpp)
+  server_context server_ctx;
 
   // Session management (updated)
   std::unordered_map<graph_execution_context, SessionInfo> sessions;
@@ -74,22 +67,13 @@ struct LlamaChatContext
   bool batch_processing_enabled;
   uint32_t batch_size;
 
-  // Configuration
-  common_params params;
-
-  // Thread function pointers (from main.cpp)
-  decltype(ggml_threadpool_new) *ggml_threadpool_new_fn;
-  decltype(ggml_threadpool_free) *ggml_threadpool_free_fn;
-
   LlamaChatContext()
-      : model(nullptr), ctx(nullptr), smpl(nullptr), vocab(nullptr),
-        threadpool(nullptr), threadpool_batch(nullptr), next_exec_ctx_id(1),
+      : next_exec_ctx_id(1),
         max_sessions(100), idle_timeout_ms(300000), auto_cleanup_enabled(true),
         max_concurrent(8), queue_size(50), active_sessions(0),
         context_shifting_enabled(true), cache_strategy("lru"), max_cache_tokens(10000),
         log_level("info"), enable_debug_log(false),
-        batch_processing_enabled(true), batch_size(512),
-        ggml_threadpool_new_fn(nullptr), ggml_threadpool_free_fn(nullptr) {}
+        batch_processing_enabled(true), batch_size(512) {}
 };
 
 // Helper function to parse JSON config into common_params
@@ -327,25 +311,29 @@ static void parse_config_to_params(const char *config_json,
 // Helper function to setup threadpools (from main.cpp)
 static wasi_nn_error setup_threadpools(LlamaChatContext *chat_ctx)
 {
+  // Access server context members through server_ctx
+  common_params& params = chat_ctx->server_ctx.params_base;
+  
   auto *reg = ggml_backend_dev_backend_reg(
       ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU));
-  chat_ctx->ggml_threadpool_new_fn =
+  auto ggml_threadpool_new_fn =
       (decltype(ggml_threadpool_new) *)ggml_backend_reg_get_proc_address(
           reg, "ggml_threadpool_new");
-  chat_ctx->ggml_threadpool_free_fn =
+  auto ggml_threadpool_free_fn =
       (decltype(ggml_threadpool_free) *)ggml_backend_reg_get_proc_address(
           reg, "ggml_threadpool_free");
 
   struct ggml_threadpool_params tpp_batch =
-      ggml_threadpool_params_from_cpu_params(chat_ctx->params.cpuparams_batch);
+      ggml_threadpool_params_from_cpu_params(params.cpuparams_batch);
   struct ggml_threadpool_params tpp =
-      ggml_threadpool_params_from_cpu_params(chat_ctx->params.cpuparams);
+      ggml_threadpool_params_from_cpu_params(params.cpuparams);
 
   // Create batch threadpool if different from main threadpool
+  ggml_threadpool* threadpool_batch = nullptr;
   if (!ggml_threadpool_params_match(&tpp, &tpp_batch))
   {
-    chat_ctx->threadpool_batch = chat_ctx->ggml_threadpool_new_fn(&tpp_batch);
-    if (!chat_ctx->threadpool_batch)
+    threadpool_batch = ggml_threadpool_new_fn(&tpp_batch);
+    if (!threadpool_batch)
     {
       NN_ERR_PRINTF("Failed to create batch threadpool");
       return runtime_error;
@@ -353,15 +341,15 @@ static wasi_nn_error setup_threadpools(LlamaChatContext *chat_ctx)
     tpp.paused = true;
   }
 
-  chat_ctx->threadpool = chat_ctx->ggml_threadpool_new_fn(&tpp);
-  if (!chat_ctx->threadpool)
+  ggml_threadpool* threadpool = ggml_threadpool_new_fn(&tpp);
+  if (!threadpool)
   {
     NN_ERR_PRINTF("Failed to create threadpool");
     return runtime_error;
   }
 
-  llama_attach_threadpool(chat_ctx->ctx, chat_ctx->threadpool,
-                          chat_ctx->threadpool_batch);
+  llama_attach_threadpool(chat_ctx->server_ctx.ctx, threadpool,
+                          threadpool_batch);
   return success;
 }
 
@@ -546,27 +534,8 @@ __attribute__((visibility("default"))) wasi_nn_error deinit_backend(void *ctx)
   if (!chat_ctx)
     return invalid_argument;
 
-  // Cleanup in reverse order
-  if (chat_ctx->smpl)
-  {
-    common_sampler_free(chat_ctx->smpl);
-    chat_ctx->smpl = nullptr;
-  }
-
-  if (chat_ctx->threadpool)
-  {
-    chat_ctx->ggml_threadpool_free_fn(chat_ctx->threadpool);
-    chat_ctx->threadpool = nullptr;
-  }
-
-  if (chat_ctx->threadpool_batch)
-  {
-    chat_ctx->ggml_threadpool_free_fn(chat_ctx->threadpool_batch);
-    chat_ctx->threadpool_batch = nullptr;
-  }
-
   // Note: model and ctx are managed by common_init_result's unique_ptrs
-  // They will be automatically cleaned up
+  // They will be automatically cleaned up by the server_context
 
   llama_backend_free();
   delete chat_ctx;
@@ -585,27 +554,18 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
   NN_DBG_PRINTF("Config: %s", config ? config : "null");
 
   // Parse config into params
-  parse_config_to_params(config, chat_ctx->params);
-  chat_ctx->params.model.path = filename;
+  parse_config_to_params(config, chat_ctx->server_ctx.params_base);
+  chat_ctx->server_ctx.params_base.model.path = filename;
 
-  // Load model using main.cpp's approach
-  common_init_result llama_init = common_init_from_params(chat_ctx->params);
-
-  chat_ctx->model = llama_init.model.get();
-  chat_ctx->ctx = llama_init.context.get();
-
-  if (!chat_ctx->model)
-  {
-    NN_ERR_PRINTF("Failed to load model from file %s", filename);
-    return runtime_error;
+  // Load model using server_context's approach
+  if (!chat_ctx->server_ctx.load_model(chat_ctx->server_ctx.params_base)) {
+      NN_ERR_PRINTF("Failed to load model from file %s", filename);
+      return runtime_error;
   }
 
-  chat_ctx->vocab = llama_model_get_vocab(chat_ctx->model);
-  chat_ctx->chat_templates = common_chat_templates_init(chat_ctx->model, "");
-
   // Check context size
-  const int n_ctx_train = llama_model_n_ctx_train(chat_ctx->model);
-  const int n_ctx = llama_n_ctx(chat_ctx->ctx);
+  const int n_ctx_train = llama_model_n_ctx_train(chat_ctx->server_ctx.model);
+  const int n_ctx = llama_n_ctx(chat_ctx->server_ctx.ctx);
 
   if (n_ctx > n_ctx_train)
   {
@@ -614,10 +574,6 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
   }
 
   NN_INFO_PRINTF("Model loaded successfully. Context size: %d", n_ctx);
-
-  // Store the llama_init result to keep the unique_ptrs alive
-  // We'll need to store this somewhere in the context
-  static thread_local common_init_result stored_init = std::move(llama_init);
 
   return success;
 }
@@ -683,7 +639,7 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
     void *ctx, graph g, graph_execution_context *exec_ctx)
 {
   LlamaChatContext *chat_ctx = (LlamaChatContext *)ctx;
-  if (!chat_ctx || !chat_ctx->model)
+  if (!chat_ctx || !chat_ctx->server_ctx.model)
     return invalid_argument;
 
   // Check concurrency limit
@@ -698,26 +654,15 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
   auto_cleanup_sessions(chat_ctx);
 
   // Initialize sampler if not already done (from main.cpp)
-  if (!chat_ctx->smpl)
+  // Setup threadpools if not already done
+  wasi_nn_error result = setup_threadpools(chat_ctx);
+  if (result != success)
   {
-    chat_ctx->smpl =
-        common_sampler_init(chat_ctx->model, chat_ctx->params.sampling);
-    if (!chat_ctx->smpl)
-    {
-      NN_ERR_PRINTF("Failed to initialize sampler");
-      return runtime_error;
-    }
+    return result;
   }
 
-  // Setup threadpools if not already done
-  if (!chat_ctx->threadpool)
-  {
-    wasi_nn_error result = setup_threadpools(chat_ctx);
-    if (result != success)
-    {
-      return result;
-    }
-  }
+  // Initialize the server context
+  chat_ctx->server_ctx.init();
 
   // Create new session
   graph_execution_context new_exec_ctx = chat_ctx->next_exec_ctx_id++;
@@ -787,7 +732,7 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
     new_msg.content = content;
 
     auto formatted = common_chat_format_single(
-        chat_ctx->chat_templates.get(), chat_msgs, new_msg, role == "user",
+        chat_ctx->server_ctx.chat_templates.get(), chat_msgs, new_msg, role == "user",
         false // use_jinja
     );
 
@@ -803,7 +748,7 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
                 prompt.c_str());
 
   // Clear KV cache for session isolation (as per user's requirement)
-  llama_memory_clear(llama_get_memory(chat_ctx->ctx), true);
+  llama_memory_clear(llama_get_memory(chat_ctx->server_ctx.ctx), true);
 
   // Tokenize the complete conversation history
   common_chat_templates_inputs inputs;
@@ -811,12 +756,12 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
   inputs.add_generation_prompt = true;
 
   std::string full_prompt =
-      common_chat_templates_apply(chat_ctx->chat_templates.get(), inputs)
+      common_chat_templates_apply(chat_ctx->server_ctx.chat_templates.get(), inputs)
           .prompt;
 
   // Tokenize
   std::vector<llama_token> tokens =
-      common_tokenize(chat_ctx->ctx, full_prompt, true, true);
+      common_tokenize(chat_ctx->server_ctx.ctx, full_prompt, true, true);
 
   // Generate response (simplified version of main.cpp's loop)
   std::string response;
@@ -824,26 +769,26 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
   // Process input tokens
   llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
 
-  if (llama_decode(chat_ctx->ctx, batch))
+  if (llama_decode(chat_ctx->server_ctx.ctx, batch))
   {
     NN_ERR_PRINTF("Failed to decode input tokens");
     return "Error: Failed to process input";
   }
 
   // Generate tokens one by one
-  for (int i = 0; i < chat_ctx->params.n_predict; ++i)
+  for (int i = 0; i < chat_ctx->server_ctx.params_base.n_predict; ++i)
   {
     llama_token new_token =
-        common_sampler_sample(chat_ctx->smpl, chat_ctx->ctx, -1);
+        common_sampler_sample(chat_ctx->server_ctx.slots[0].smpl, chat_ctx->server_ctx.ctx, -1);
 
-    if (llama_vocab_is_eog(chat_ctx->vocab, new_token))
+    if (llama_vocab_is_eog(chat_ctx->server_ctx.vocab, new_token))
     {
       break;
     }
 
     // Convert token to text
     char buf[256];
-    int n = llama_token_to_piece(chat_ctx->vocab, new_token, buf, sizeof(buf),
+    int n = llama_token_to_piece(chat_ctx->server_ctx.vocab, new_token, buf, sizeof(buf),
                                  0, true);
     if (n > 0)
     {
@@ -852,7 +797,7 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
 
     // Prepare next batch
     batch = llama_batch_get_one(&new_token, 1);
-    if (llama_decode(chat_ctx->ctx, batch))
+    if (llama_decode(chat_ctx->server_ctx.ctx, batch))
     {
       NN_ERR_PRINTF("Failed to decode generated token");
       break;
@@ -871,7 +816,7 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
               uint32_t *output_tensor_size)
 {
   LlamaChatContext *chat_ctx = (LlamaChatContext *)ctx;
-  if (!chat_ctx || !chat_ctx->ctx || !chat_ctx->smpl)
+  if (!chat_ctx || !chat_ctx->server_ctx.ctx)
   {
     return invalid_argument;
   }
