@@ -30,6 +30,46 @@
 #include <thread>
 #include <condition_variable>
 
+// Enhanced logging macros that work with both old and new systems
+#define WASI_NN_LOG_DEBUG(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_DBG("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_DBG_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+#define WASI_NN_LOG_INFO(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_INF("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_INFO_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+#define WASI_NN_LOG_WARN(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_WRN("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_WARN_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+#define WASI_NN_LOG_ERROR(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_ERR("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_ERR_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+// Forward declarations for helper functions
+static void parse_config_to_params(const char *config_json, common_params &params);
+
 // Task priority levels for WASI-NN backend
 enum wasi_nn_task_priority
 {
@@ -131,6 +171,20 @@ struct LlamaChatContext
   // Logging system state
   struct common_log * log_instance;
   bool log_initialized;
+  
+  // Phase 5.2: Model Hot-Swapping
+  std::string current_model_path;
+  std::string current_model_version;
+  std::string current_model_hash;
+  bool model_swapping_in_progress;
+  std::mutex model_swap_mutex;
+  common_params backup_params;
+  
+  // Model compatibility info
+  int64_t model_context_length;
+  int64_t model_vocab_size;
+  std::string model_architecture;
+  std::string model_name;
 
   // Performance settings
   bool batch_processing_enabled;
@@ -147,6 +201,9 @@ struct LlamaChatContext
         current_memory_usage(0), peak_memory_usage(0), cache_hits(0), cache_misses(0),
         log_level("info"), enable_debug_log(false), enable_timestamps(true), enable_colors(false),
         log_instance(nullptr), log_initialized(false),
+        current_model_path(""), current_model_version(""), current_model_hash(""),
+        model_swapping_in_progress(false), model_context_length(0), model_vocab_size(0),
+        model_architecture(""), model_name(""),
         batch_processing_enabled(true), batch_size(512) {}
   
   // Destructor will be defined after wasi_nn_task_queue definition
@@ -207,8 +264,229 @@ LlamaChatContext::~LlamaChatContext() {
 }
 
 // ==============================================================================
-// Phase 5.1: Advanced Logging System Implementation
+// Phase 5.2: Stable Model Switching Implementation
 // ==============================================================================
+
+// Wait for all active tasks to complete
+static wasi_nn_error wait_for_tasks_completion(LlamaChatContext *chat_ctx, uint32_t timeout_ms = 30000) {
+  if (!chat_ctx || !chat_ctx->task_queue) {
+    return success; // No tasks to wait for
+  }
+  
+  auto start_time = std::chrono::steady_clock::now();
+  auto timeout = std::chrono::milliseconds(timeout_ms);
+  
+  NN_INFO_PRINTF("Waiting for active tasks to complete before model switch...");
+  
+  while (true) {
+    uint32_t queued = 0, active = 0, capacity = 0;
+    chat_ctx->task_queue->get_queue_status(queued, active, capacity);
+    
+    if (active == 0 && queued == 0) {
+      NN_INFO_PRINTF("All tasks completed, ready for model switch");
+      return success;
+    }
+    
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+    if (elapsed > timeout) {
+      NN_WARN_PRINTF("Timeout waiting for tasks completion, proceeding with model switch");
+      return success; // Proceed anyway after timeout
+    }
+    
+    NN_DBG_PRINTF("Waiting for tasks: queued=%u, active=%u", queued, active);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
+
+// Clean up all slots and contexts before model switch
+static void cleanup_all_slots(LlamaChatContext *chat_ctx) {
+  if (!chat_ctx) return;
+  
+  WASI_NN_LOG_INFO(chat_ctx, "Cleaning up all slots before model switch");
+  
+  // Clear all slots using server context approach
+  for (auto& slot : chat_ctx->server_ctx.slots) {
+    // Free sampling context
+    if (slot.smpl) {
+      common_sampler_free(slot.smpl);
+      slot.smpl = nullptr;
+    }
+    
+    // Free draft context
+    if (slot.ctx_dft) {
+      llama_free(slot.ctx_dft);
+      slot.ctx_dft = nullptr;
+    }
+    
+    // Free speculative context
+    if (slot.spec) {
+      common_speculative_free(slot.spec);
+      slot.spec = nullptr;
+    }
+    
+    // Free batch
+    if (slot.batch_spec.token) {
+      llama_batch_free(slot.batch_spec);
+      slot.batch_spec = {};
+    }
+    
+    // Reset slot state
+    slot.reset();
+  }
+  
+  // Clear all slots
+  chat_ctx->server_ctx.slots.clear();
+  
+  // Clear main batch
+  if (chat_ctx->server_ctx.batch.token) {
+    llama_batch_free(chat_ctx->server_ctx.batch);
+    chat_ctx->server_ctx.batch = {};
+  }
+  
+  // Clear KV cache
+  if (chat_ctx->server_ctx.ctx) {
+    llama_memory_t mem = llama_get_memory(chat_ctx->server_ctx.ctx);
+    if (mem) {
+      llama_memory_clear(mem, true);
+    }
+  }
+  
+  WASI_NN_LOG_INFO(chat_ctx, "All slots cleaned up successfully");
+}
+
+// Safely switch to a new model
+static wasi_nn_error safe_model_switch(LlamaChatContext *chat_ctx, const char *filename, 
+                                       uint32_t filename_len, const char *config) {
+  if (!chat_ctx) {
+    return invalid_argument;
+  }
+  
+  // Lock to prevent concurrent access during model switch
+  std::lock_guard<std::mutex> lock(chat_ctx->model_swap_mutex);
+  
+  if (chat_ctx->model_swapping_in_progress) {
+    WASI_NN_LOG_WARN(chat_ctx, "Model switch already in progress, skipping");
+    return runtime_error;
+  }
+  
+  chat_ctx->model_swapping_in_progress = true;
+  
+  WASI_NN_LOG_INFO(chat_ctx, "Starting safe model switch to: %.*s", (int)filename_len, filename);
+  
+  try {
+    // Step 1: Wait for all active tasks to complete
+    wasi_nn_error wait_result = wait_for_tasks_completion(chat_ctx, 30000);
+    if (wait_result != success) {
+      WASI_NN_LOG_WARN(chat_ctx, "Task completion wait failed, continuing with model switch");
+    }
+    
+    // Step 2: Backup current parameters
+    chat_ctx->backup_params = chat_ctx->server_ctx.params_base;
+    
+    // Step 3: Parse new configuration
+    common_params new_params = chat_ctx->server_ctx.params_base;
+    if (config) {
+      parse_config_to_params(config, new_params);
+    }
+    new_params.model.path = std::string(filename, filename_len);
+    
+    WASI_NN_LOG_INFO(chat_ctx, "New model config: n_gpu_layers=%d, ctx_size=%d, batch_size=%d, threads=%d",
+                     new_params.n_gpu_layers, new_params.n_ctx, 
+                     new_params.n_batch, new_params.cpuparams.n_threads);
+    
+    // Step 4: Clean up all existing slots and contexts
+    cleanup_all_slots(chat_ctx);
+    
+    // Step 5: Reset server context state
+    chat_ctx->server_ctx.llama_init.model.reset();
+    chat_ctx->server_ctx.llama_init.context.reset();
+    chat_ctx->server_ctx.llama_init_dft.model.reset();
+    chat_ctx->server_ctx.llama_init_dft.context.reset();
+    
+    chat_ctx->server_ctx.model = nullptr;
+    chat_ctx->server_ctx.ctx = nullptr;
+    chat_ctx->server_ctx.model_dft = nullptr;
+    chat_ctx->server_ctx.vocab = nullptr;
+    
+    // Step 6: Load new model
+    chat_ctx->server_ctx.params_base = new_params;
+    
+    if (!chat_ctx->server_ctx.load_model(new_params)) {
+      WASI_NN_LOG_ERROR(chat_ctx, "Failed to load new model, attempting to restore previous model");
+      
+      // Attempt to restore previous model
+      if (!chat_ctx->server_ctx.load_model(chat_ctx->backup_params)) {
+        WASI_NN_LOG_ERROR(chat_ctx, "Failed to restore previous model - system in unstable state");
+        chat_ctx->model_swapping_in_progress = false;
+        return runtime_error;
+      }
+      
+      WASI_NN_LOG_INFO(chat_ctx, "Previous model restored successfully");
+      chat_ctx->model_swapping_in_progress = false;
+      return runtime_error;
+    }
+    
+    // Step 7: Reinitialize server context
+    chat_ctx->server_ctx.init();
+    
+    // Step 8: Update model information
+    chat_ctx->current_model_path = std::string(filename, filename_len);
+    chat_ctx->model_context_length = llama_model_n_ctx_train(chat_ctx->server_ctx.model);
+    chat_ctx->model_vocab_size = llama_vocab_n_tokens(chat_ctx->server_ctx.vocab);
+    
+    // Get model architecture and name if available
+    char model_desc[256] = {0};
+    if (llama_model_desc(chat_ctx->server_ctx.model, model_desc, sizeof(model_desc)) > 0) {
+      chat_ctx->model_architecture = std::string(model_desc);
+    }
+    
+    // Extract model name from path
+    std::string path(filename, filename_len);
+    size_t last_slash = path.find_last_of("/\\");
+    chat_ctx->model_name = (last_slash != std::string::npos) ? 
+                           path.substr(last_slash + 1) : path;
+    
+    // Generate version string
+    struct stat file_stat;
+    if (stat(filename, &file_stat) == 0) {
+      char version_buf[64];
+      snprintf(version_buf, sizeof(version_buf), "size_%ld_mtime_%ld", 
+               file_stat.st_size, file_stat.st_mtime);
+      chat_ctx->current_model_version = std::string(version_buf);
+    }
+    
+    // Step 9: Clear all sessions (context will be lost)
+    chat_ctx->sessions.clear();
+    chat_ctx->next_exec_ctx_id = 1;
+    chat_ctx->active_sessions = 0;
+    
+    WASI_NN_LOG_INFO(chat_ctx, "Model switch completed successfully");
+    WASI_NN_LOG_INFO(chat_ctx, "Model info: name=%s, arch=%s, vocab_size=%ld, ctx_len=%ld", 
+                     chat_ctx->model_name.c_str(), chat_ctx->model_architecture.c_str(),
+                     chat_ctx->model_vocab_size, chat_ctx->model_context_length);
+    
+    chat_ctx->model_swapping_in_progress = false;
+    return success;
+    
+  } catch (const std::exception& e) {
+    WASI_NN_LOG_ERROR(chat_ctx, "Exception during model switch: %s", e.what());
+    
+    // Attempt to restore previous model
+    try {
+      if (!chat_ctx->server_ctx.load_model(chat_ctx->backup_params)) {
+        WASI_NN_LOG_ERROR(chat_ctx, "Failed to restore previous model after exception");
+      } else {
+        WASI_NN_LOG_INFO(chat_ctx, "Previous model restored after exception");
+        chat_ctx->server_ctx.init();
+      }
+    } catch (...) {
+      WASI_NN_LOG_ERROR(chat_ctx, "Exception during model restoration");
+    }
+    
+    chat_ctx->model_swapping_in_progress = false;
+    return runtime_error;
+  }
+}
 
 // Convert string log level to common_log verbosity level
 static int string_to_log_verbosity(const std::string& level) {
@@ -265,43 +543,6 @@ static bool initialize_advanced_logging(LlamaChatContext* chat_ctx) {
   
   return true;
 }
-
-// Enhanced logging macros that work with both old and new systems
-#define WASI_NN_LOG_DEBUG(ctx, fmt, ...) \
-  do { \
-    if (ctx && ctx->log_initialized) { \
-      LOG_DBG("[WASI-NN] " fmt, ##__VA_ARGS__); \
-    } else { \
-      NN_DBG_PRINTF(fmt, ##__VA_ARGS__); \
-    } \
-  } while(0)
-
-#define WASI_NN_LOG_INFO(ctx, fmt, ...) \
-  do { \
-    if (ctx && ctx->log_initialized) { \
-      LOG_INF("[WASI-NN] " fmt, ##__VA_ARGS__); \
-    } else { \
-      NN_INFO_PRINTF(fmt, ##__VA_ARGS__); \
-    } \
-  } while(0)
-
-#define WASI_NN_LOG_WARN(ctx, fmt, ...) \
-  do { \
-    if (ctx && ctx->log_initialized) { \
-      LOG_WRN("[WASI-NN] " fmt, ##__VA_ARGS__); \
-    } else { \
-      NN_WARN_PRINTF(fmt, ##__VA_ARGS__); \
-    } \
-  } while(0)
-
-#define WASI_NN_LOG_ERROR(ctx, fmt, ...) \
-  do { \
-    if (ctx && ctx->log_initialized) { \
-      LOG_ERR("[WASI-NN] " fmt, ##__VA_ARGS__); \
-    } else { \
-      NN_ERR_PRINTF(fmt, ##__VA_ARGS__); \
-    } \
-  } while(0)
 
 // Structured logging for performance metrics
 static void log_performance_metrics(LlamaChatContext* chat_ctx, const std::string& operation, 
@@ -1435,6 +1676,25 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
   NN_DBG_PRINTF("Loading model: %s", filename);
   NN_DBG_PRINTF("Config: %s", config ? config : "null");
 
+  // Check if this is a model switch (if a model is already loaded)
+  bool is_model_switch = (chat_ctx->server_ctx.model != nullptr);
+  
+  if (is_model_switch) {
+    NN_INFO_PRINTF("Performing safe model switch from %s to %s", 
+                   chat_ctx->current_model_path.c_str(), filename);
+    
+    // Use safe model switching
+    wasi_nn_error switch_result = safe_model_switch(chat_ctx, filename, filename_len, config);
+    if (switch_result != success) {
+      NN_ERR_PRINTF("Safe model switch failed: %d", switch_result);
+      return switch_result;
+    }
+    
+    NN_INFO_PRINTF("Safe model switch completed successfully");
+    return success;
+  }
+
+  // Initial model loading (no existing model)
   // Parse config into params
   parse_config_to_params(config, chat_ctx->server_ctx.params_base);
   chat_ctx->server_ctx.params_base.model.path = filename;
@@ -1451,6 +1711,9 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
       return runtime_error;
   }
 
+  // Initialize server context
+  chat_ctx->server_ctx.init();
+
   // Check context size
   const int n_ctx_train = llama_model_n_ctx_train(chat_ctx->server_ctx.model);
   const int n_ctx = llama_n_ctx(chat_ctx->server_ctx.ctx);
@@ -1461,7 +1724,36 @@ load_by_name_with_config(void *ctx, const char *filename, uint32_t filename_len,
                    n_ctx_train, n_ctx);
   }
 
+  // Phase 5.2: Record model information for safe switching
+  chat_ctx->current_model_path = std::string(filename, filename_len);
+  chat_ctx->model_context_length = n_ctx_train;
+  chat_ctx->model_vocab_size = llama_vocab_n_tokens(chat_ctx->server_ctx.vocab);
+  
+  // Get model architecture and name if available
+  char model_desc[256] = {0};
+  if (llama_model_desc(chat_ctx->server_ctx.model, model_desc, sizeof(model_desc)) > 0) {
+    chat_ctx->model_architecture = std::string(model_desc);
+  }
+  
+  // Extract model name from path
+  std::string path(filename, filename_len);
+  size_t last_slash = path.find_last_of("/\\");
+  chat_ctx->model_name = (last_slash != std::string::npos) ? 
+                         path.substr(last_slash + 1) : path;
+  
+  // Generate simple version string based on file size and modification time
+  struct stat file_stat;
+  if (stat(filename, &file_stat) == 0) {
+    char version_buf[64];
+    snprintf(version_buf, sizeof(version_buf), "size_%ld_mtime_%ld", 
+             file_stat.st_size, file_stat.st_mtime);
+    chat_ctx->current_model_version = std::string(version_buf);
+  }
+
   NN_INFO_PRINTF("Model loaded successfully. Context size: %d", n_ctx);
+  NN_INFO_PRINTF("Model info recorded: name=%s, arch=%s, vocab_size=%ld, ctx_len=%ld", 
+                 chat_ctx->model_name.c_str(), chat_ctx->model_architecture.c_str(),
+                 chat_ctx->model_vocab_size, chat_ctx->model_context_length);
 
   return success;
 }
