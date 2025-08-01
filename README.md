@@ -43,11 +43,10 @@ The build process will create a shared library `libwasi_nn_backend.so` in the bu
 The project includes a test program that demonstrates how to use the WASI-NN backend:
 
 ```bash
-# Build and run the test
-make test
-
-# Run the test executable
-./main
+# Build project first
+cd build & make -j16 & cd ..
+# Build and run the test & Run the test executable
+make test & ./main
 ```
 
 The test program:

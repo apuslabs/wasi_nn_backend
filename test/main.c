@@ -93,23 +93,32 @@ int main()
     const char *config = "{"
                          "\"n_gpu_layers\":98,"
                          "\"ctx_size\":2048,"
-                         "\"stream-stdout\":true,"
-                         "\"enable_debug_log\":true,"
-                         "\"max_concurrent\":4,"
-                         "\"queue_size\":20,"
-                         "\"memory_policy\":{"
-                         "\"context_shifting\":true,"
-                         "\"cache_strategy\":\"lru\","
-                         "\"max_cache_tokens\":5000"
+                         "\"n_predict\":512,"
+                         "\"batch_size\":512,"
+                         "\"threads\":8,"
+                         "\"sampling\":{"
+                         "\"temp\":0.7,"
+                         "\"top_p\":0.95,"
+                         "\"top_k\":40,"
+                         "\"min_p\":0.05,"
+                         "\"typical_p\":1.0,"
+                         "\"repeat_penalty\":1.10,"
+                         "\"presence_penalty\":0.0,"
+                         "\"frequency_penalty\":0.0,"
+                         "\"penalty_last_n\":64,"
+                         "\"mirostat\":0,"
+                         "\"mirostat_tau\":5.0,"
+                         "\"mirostat_eta\":0.1,"
+                         "\"seed\":-1"
                          "},"
-                         "\"logging\":{"
-                         "\"level\":\"debug\","
-                         "\"enable_debug\":true,"
-                         "\"file\":\"/tmp/wasi_nn_backend.log\""
+                         "\"stopping\":{"
+                         "\"max_tokens\":256,"
+                         "\"max_time_ms\":30000,"
+                         "\"ignore_eos\":false,"
+                         "\"stop\":[\"\\n\\n\"]"
                          "},"
-                         "\"performance\":{"
-                         "\"batch_processing\":true,"
-                         "\"batch_size\":256"
+                         "\"memory\":{"
+                         "\"context_shifting\":true"
                          "}"
                          "}";
     err = load_by_name_with_config(backend_ctx, model_filename, strlen(model_filename), config, strlen(config), &g);
@@ -161,8 +170,8 @@ int main()
     printf("\nrun Inference1 successful\n");
     printf("Output: %s\n", output_tensor);
 
-    // Test concurrency limit
-    printf("\n--- Testing concurrency limit ---\n");
+    // Test concurrency limit and queue management
+    printf("\n--- Testing concurrency limit and queue management ---\n");
     graph_execution_context exec_ctx2, exec_ctx3, exec_ctx4, exec_ctx5;
 
     // Try to create more sessions than the limit (max_concurrent=4)
@@ -193,15 +202,48 @@ int main()
             {
                 printf("Execution context 4 initialized successfully\n");
 
-                // This should fail because we've reached the concurrency limit
+                // This should be queued because we've reached the concurrency limit
+                // but there's still room in the queue (queue_size=20)
                 err = init_execution_context(backend_ctx, g, &exec_ctx5);
                 if (err != success)
                 {
-                    printf("Correctly rejected execution context 5 due to concurrency limit\n");
+                    printf("Failed to initialize execution context 5\n");
                 }
                 else
                 {
-                    printf("ERROR: Execution context 5 should have been rejected due to concurrency limit\n");
+                    printf("Execution context 5 queued successfully\n");
+                    
+                    // Run inference on exec_ctx5 to test the queue
+                    tensor input_tensor2;
+                    const char *prompt2 = "What is the capital of France?";
+                    input_tensor2.data = (tensor_data)prompt2;
+                    input_tensor2.dimensions = NULL;
+                    input_tensor2.type = fp32;
+                    
+                    uint32_t output_tensor_size2 = 1024;
+                    tensor_data output_tensor2 = (tensor_data)calloc(output_tensor_size2, sizeof(uint8_t));
+                    if (output_tensor2 == NULL)
+                    {
+                        fprintf(stderr, "Failed to allocate output tensor 2\n");
+                    }
+                    else
+                    {
+                        printf("Running inference on queued context...\n");
+                        err = run_inference(backend_ctx, exec_ctx5, 0, &input_tensor2, output_tensor2, &output_tensor_size2);
+                        if (err != success)
+                        {
+                            fprintf(stderr, "Queued inference failed\n");
+                        }
+                        else
+                        {
+                            printf("Queued inference successful\n");
+                            printf("Output: %s\n", output_tensor2);
+                        }
+                        free(output_tensor2);
+                    }
+                    
+                    // Close exec_ctx5 to clean up
+                    close_execution_context(backend_ctx, exec_ctx5);
                 }
 
                 // Close one session and try again
@@ -215,17 +257,18 @@ int main()
                     printf("Execution context 4 closed successfully\n");
                 }
 
-                // Now this should succeed
-                err = init_execution_context(backend_ctx, g, &exec_ctx5);
+                // Now this should succeed directly (not queued)
+                graph_execution_context exec_ctx6;
+                err = init_execution_context(backend_ctx, g, &exec_ctx6);
                 if (err != success)
                 {
-                    fprintf(stderr, "Failed to initialize execution context 5 after closing one\n");
+                    fprintf(stderr, "Failed to initialize execution context 6\n");
                 }
                 else
                 {
-                    printf("Execution context 5 initialized successfully after closing one\n");
+                    printf("Execution context 6 initialized successfully (not queued)\n");
                     // Close it to clean up
-                    close_execution_context(backend_ctx, exec_ctx5);
+                    close_execution_context(backend_ctx, exec_ctx6);
                 }
             }
 

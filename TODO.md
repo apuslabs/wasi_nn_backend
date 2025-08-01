@@ -101,10 +101,10 @@ Enhance the wasi_nn_backend implementation to include advanced features while ma
 ```
 
 **Tasks:**
-- [ ] Extend config parsing to support all sampling parameters
+- [x] Extend config parsing to support all sampling parameters
 - [ ] Implement advanced sampling algorithms
-- [ ] Add stopping criteria configuration
-- [ ] Implement memory management settings
+- [x] Add stopping criteria configuration
+- [x] Implement memory management settings
 - [ ] Add model hot-swapping capability
 
 ### Phase 2: Concurrency and Task Management

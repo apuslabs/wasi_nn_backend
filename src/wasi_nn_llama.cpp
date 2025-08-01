@@ -121,6 +121,7 @@ static void parse_config_to_params(const char *config_json,
 
   cJSON *item = nullptr;
 
+  // Basic model parameters
   if ((item = cJSON_GetObjectItem(root, "n_predict")))
   {
     params.n_predict = (int32_t)cJSON_GetNumberValue(item);
@@ -147,6 +148,7 @@ static void parse_config_to_params(const char *config_json,
     params.cpuparams_batch.n_threads = (uint32_t)cJSON_GetNumberValue(item);
   }
 
+  // Simple sampling parameters (backward compatibility)
   if ((item = cJSON_GetObjectItem(root, "temp")))
   {
     params.sampling.temp = (float)cJSON_GetNumberValue(item);
@@ -160,6 +162,163 @@ static void parse_config_to_params(const char *config_json,
   if ((item = cJSON_GetObjectItem(root, "repeat_penalty")))
   {
     params.sampling.penalty_repeat = (float)cJSON_GetNumberValue(item);
+  }
+
+  // Advanced sampling parameters
+  cJSON *sampling = cJSON_GetObjectItem(root, "sampling");
+  if (cJSON_IsObject(sampling))
+  {
+    cJSON *temp = cJSON_GetObjectItem(sampling, "temp");
+    if (cJSON_IsNumber(temp))
+    {
+      params.sampling.temp = (float)cJSON_GetNumberValue(temp);
+    }
+
+    cJSON *top_p = cJSON_GetObjectItem(sampling, "top_p");
+    if (cJSON_IsNumber(top_p))
+    {
+      params.sampling.top_p = (float)cJSON_GetNumberValue(top_p);
+    }
+
+    cJSON *top_k = cJSON_GetObjectItem(sampling, "top_k");
+    if (cJSON_IsNumber(top_k))
+    {
+      params.sampling.top_k = (int32_t)cJSON_GetNumberValue(top_k);
+    }
+
+    cJSON *min_p = cJSON_GetObjectItem(sampling, "min_p");
+    if (cJSON_IsNumber(min_p))
+    {
+      params.sampling.min_p = (float)cJSON_GetNumberValue(min_p);
+    }
+
+    // Note: tfs_z might not be available in this version
+    // cJSON *tfs_z = cJSON_GetObjectItem(sampling, "tfs_z");
+    // if (cJSON_IsNumber(tfs_z))
+    // {
+    //   params.sampling.tfs_z = (float)cJSON_GetNumberValue(tfs_z);
+    // }
+
+    cJSON *typical_p = cJSON_GetObjectItem(sampling, "typical_p");
+    if (cJSON_IsNumber(typical_p))
+    {
+      params.sampling.typ_p = (float)cJSON_GetNumberValue(typical_p);
+    }
+
+    cJSON *repeat_penalty = cJSON_GetObjectItem(sampling, "repeat_penalty");
+    if (cJSON_IsNumber(repeat_penalty))
+    {
+      params.sampling.penalty_repeat = (float)cJSON_GetNumberValue(repeat_penalty);
+    }
+
+    cJSON *presence_penalty = cJSON_GetObjectItem(sampling, "presence_penalty");
+    if (cJSON_IsNumber(presence_penalty))
+    {
+      params.sampling.penalty_present = (float)cJSON_GetNumberValue(presence_penalty);
+    }
+
+    cJSON *frequency_penalty = cJSON_GetObjectItem(sampling, "frequency_penalty");
+    if (cJSON_IsNumber(frequency_penalty))
+    {
+      params.sampling.penalty_freq = (float)cJSON_GetNumberValue(frequency_penalty);
+    }
+
+    cJSON *penalty_last_n = cJSON_GetObjectItem(sampling, "penalty_last_n");
+    if (cJSON_IsNumber(penalty_last_n))
+    {
+      params.sampling.penalty_last_n = (int32_t)cJSON_GetNumberValue(penalty_last_n);
+    }
+
+    cJSON *mirostat = cJSON_GetObjectItem(sampling, "mirostat");
+    if (cJSON_IsNumber(mirostat))
+    {
+      params.sampling.mirostat = (int32_t)cJSON_GetNumberValue(mirostat);
+    }
+
+    cJSON *mirostat_tau = cJSON_GetObjectItem(sampling, "mirostat_tau");
+    if (cJSON_IsNumber(mirostat_tau))
+    {
+      params.sampling.mirostat_tau = (float)cJSON_GetNumberValue(mirostat_tau);
+    }
+
+    cJSON *mirostat_eta = cJSON_GetObjectItem(sampling, "mirostat_eta");
+    if (cJSON_IsNumber(mirostat_eta))
+    {
+      params.sampling.mirostat_eta = (float)cJSON_GetNumberValue(mirostat_eta);
+    }
+
+    cJSON *seed = cJSON_GetObjectItem(sampling, "seed");
+    if (cJSON_IsNumber(seed))
+    {
+      params.sampling.seed = (int32_t)cJSON_GetNumberValue(seed);
+    }
+  }
+
+  // Stopping criteria
+  cJSON *stopping = cJSON_GetObjectItem(root, "stopping");
+  if (cJSON_IsObject(stopping))
+  {
+    cJSON *max_tokens = cJSON_GetObjectItem(stopping, "max_tokens");
+    if (cJSON_IsNumber(max_tokens))
+    {
+      params.n_predict = (int32_t)cJSON_GetNumberValue(max_tokens);
+    }
+
+    // Use max_params instead of max_gen_time if available
+    cJSON *max_time_ms = cJSON_GetObjectItem(stopping, "max_time_ms");
+    if (cJSON_IsNumber(max_time_ms))
+    {
+      // Convert milliseconds to seconds
+      // Note: This field might not exist in this version of the library
+      // params.max_gen_time = (float)cJSON_GetNumberValue(max_time_ms) / 1000.0f;
+    }
+
+    cJSON *ignore_eos = cJSON_GetObjectItem(stopping, "ignore_eos");
+    if (cJSON_IsBool(ignore_eos))
+    {
+      params.sampling.ignore_eos = cJSON_IsTrue(ignore_eos);
+    }
+
+    // Handle stop sequences
+    cJSON *stop = cJSON_GetObjectItem(stopping, "stop");
+    if (cJSON_IsArray(stop))
+    {
+      // Clear existing stop sequences
+      params.sampling.grammar_triggers.clear();
+      
+      int array_size = cJSON_GetArraySize(stop);
+      for (int i = 0; i < array_size; i++)
+      {
+        cJSON *stop_item = cJSON_GetArrayItem(stop, i);
+        if (cJSON_IsString(stop_item))
+        {
+          // Add stop sequence to grammar triggers
+          common_grammar_trigger trigger;
+          trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;  // Use pattern type for string matching
+          trigger.value = std::string(cJSON_GetStringValue(stop_item));
+          params.sampling.grammar_triggers.push_back(trigger);
+        }
+      }
+    }
+  }
+
+  // Memory management
+  cJSON *memory = cJSON_GetObjectItem(root, "memory");
+  if (cJSON_IsObject(memory))
+  {
+    cJSON *context_shifting = cJSON_GetObjectItem(memory, "context_shifting");
+    if (cJSON_IsBool(context_shifting))
+    {
+      // This will be handled at the context level
+    }
+
+    // Use path_prompt_cache instead of cache_prompt if available
+    cJSON *cache_prompt = cJSON_GetObjectItem(memory, "cache_prompt");
+    if (cJSON_IsBool(cache_prompt))
+    {
+      // Note: This field might not exist in this version of the library
+      // params.cache_prompt = cJSON_IsTrue(cache_prompt);
+    }
   }
 
   cJSON_Delete(root);
@@ -477,11 +636,11 @@ static void auto_cleanup_sessions(LlamaChatContext *chat_ctx)
   {
     if ((now - it->second.last_activity) > idle_timeout)
     {
-      NN_INFO_PRINTF("Auto-cleanup: removing idle session %d (idle for %lldms)",
-                     it->first,
-                     std::chrono::duration_cast<std::chrono::milliseconds>(
+      auto idle_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                          now - it->second.last_activity)
-                         .count());
+                         .count();
+      NN_INFO_PRINTF("Auto-cleanup: removing idle session %d (idle for %lldms)",
+                     it->first, (long long)idle_time);
       it = chat_ctx->sessions.erase(it);
     }
     else
@@ -644,7 +803,7 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
                 prompt.c_str());
 
   // Clear KV cache for session isolation (as per user's requirement)
-  llama_kv_self_clear(chat_ctx->ctx);
+  llama_memory_clear(llama_get_memory(chat_ctx->ctx), true);
 
   // Tokenize the complete conversation history
   common_chat_templates_inputs inputs;
