@@ -125,6 +125,12 @@ struct LlamaChatContext
   std::string log_level;
   bool enable_debug_log;
   std::string log_file;
+  bool enable_timestamps;
+  bool enable_colors;
+  
+  // Logging system state
+  struct common_log * log_instance;
+  bool log_initialized;
 
   // Performance settings
   bool batch_processing_enabled;
@@ -139,7 +145,8 @@ struct LlamaChatContext
         enable_partial_cache_deletion(true), enable_token_cache_reuse(true),
         cache_deletion_strategy("lru"), max_memory_mb(0),
         current_memory_usage(0), peak_memory_usage(0), cache_hits(0), cache_misses(0),
-        log_level("info"), enable_debug_log(false),
+        log_level("info"), enable_debug_log(false), enable_timestamps(true), enable_colors(false),
+        log_instance(nullptr), log_initialized(false),
         batch_processing_enabled(true), batch_size(512) {}
   
   // Destructor will be defined after wasi_nn_task_queue definition
@@ -168,10 +175,10 @@ struct wasi_nn_task_queue
   uint32_t tasks_rejected = 0;
   
   // Add task to appropriate priority queue
-  bool enqueue_task(wasi_nn_task &&task);
+  bool enqueue_task(wasi_nn_task &&task, LlamaChatContext* ctx = nullptr);
   
   // Get next task based on priority
-  bool dequeue_task(wasi_nn_task &task);
+  bool dequeue_task(wasi_nn_task &task, LlamaChatContext* ctx = nullptr);
   
   // Clean up expired tasks
   void cleanup_expired_tasks();
@@ -182,6 +189,13 @@ struct wasi_nn_task_queue
 
 // Implementation of LlamaChatContext destructor
 LlamaChatContext::~LlamaChatContext() {
+  // Cleanup logging system
+  if (log_initialized && log_instance) {
+    common_log_free(log_instance);
+    log_instance = nullptr;
+    log_initialized = false;
+  }
+  
   // Cleanup task processing thread
   if (task_processing_enabled && task_processor_thread.joinable()) {
     if (task_queue) {
@@ -192,16 +206,169 @@ LlamaChatContext::~LlamaChatContext() {
   }
 }
 
+// ==============================================================================
+// Phase 5.1: Advanced Logging System Implementation
+// ==============================================================================
+
+// Convert string log level to common_log verbosity level
+static int string_to_log_verbosity(const std::string& level) {
+  if (level == "debug" || level == "DEBUG") return 0;
+  if (level == "info" || level == "INFO") return 1;
+  if (level == "warn" || level == "warning" || level == "WARN" || level == "WARNING") return 2;
+  if (level == "error" || level == "ERROR") return 2;
+  if (level == "none" || level == "NONE" || level == "off" || level == "OFF") return 4;
+  return 1; // Default to INFO level
+}
+
+// Initialize advanced logging system
+static bool initialize_advanced_logging(LlamaChatContext* chat_ctx) {
+  if (!chat_ctx) return false;
+  
+  // Initialize llama.cpp logging system
+  if (chat_ctx->log_instance) {
+    common_log_free(chat_ctx->log_instance);
+  }
+  
+  chat_ctx->log_instance = common_log_init();
+  if (!chat_ctx->log_instance) {
+    NN_ERR_PRINTF("Failed to initialize advanced logging system");
+    return false;
+  }
+  
+  // Set logging verbosity based on configuration
+  int verbosity = string_to_log_verbosity(chat_ctx->log_level);
+  common_log_set_verbosity_thold(verbosity);
+  
+  // Configure colors
+  common_log_set_colors(chat_ctx->log_instance, chat_ctx->enable_colors);
+  
+  // Configure timestamps and prefixes
+  common_log_set_timestamps(chat_ctx->log_instance, chat_ctx->enable_timestamps);
+  common_log_set_prefix(chat_ctx->log_instance, true);
+  
+  // Configure file output if specified
+  if (!chat_ctx->log_file.empty()) {
+    common_log_set_file(chat_ctx->log_instance, chat_ctx->log_file.c_str());
+  }
+  
+  chat_ctx->log_initialized = true;
+  
+  // Log system initialization success
+  LOG_INF("Advanced logging system initialized");
+  LOG_INF("Log level: %s (verbosity: %d)", chat_ctx->log_level.c_str(), verbosity);
+  LOG_INF("Debug mode: %s", chat_ctx->enable_debug_log ? "enabled" : "disabled");
+  LOG_INF("Colors: %s", chat_ctx->enable_colors ? "enabled" : "disabled");
+  LOG_INF("Timestamps: %s", chat_ctx->enable_timestamps ? "enabled" : "disabled");
+  if (!chat_ctx->log_file.empty()) {
+    LOG_INF("File logging: %s", chat_ctx->log_file.c_str());
+  }
+  
+  return true;
+}
+
+// Enhanced logging macros that work with both old and new systems
+#define WASI_NN_LOG_DEBUG(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_DBG("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_DBG_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+#define WASI_NN_LOG_INFO(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_INF("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_INFO_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+#define WASI_NN_LOG_WARN(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_WRN("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_WARN_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+#define WASI_NN_LOG_ERROR(ctx, fmt, ...) \
+  do { \
+    if (ctx && ctx->log_initialized) { \
+      LOG_ERR("[WASI-NN] " fmt, ##__VA_ARGS__); \
+    } else { \
+      NN_ERR_PRINTF(fmt, ##__VA_ARGS__); \
+    } \
+  } while(0)
+
+// Structured logging for performance metrics
+static void log_performance_metrics(LlamaChatContext* chat_ctx, const std::string& operation, 
+                                   int64_t duration_us, const std::string& additional_info = "") {
+  if (!chat_ctx || !chat_ctx->log_initialized) return;
+  
+  double duration_ms = duration_us / 1000.0;
+  if (additional_info.empty()) {
+    LOG_INF("[PERF] %s completed in %.2fms", operation.c_str(), duration_ms);
+  } else {
+    LOG_INF("[PERF] %s completed in %.2fms - %s", operation.c_str(), duration_ms, additional_info.c_str());
+  }
+}
+
+// Structured logging for memory operations
+static void log_memory_operation(LlamaChatContext* chat_ctx, const std::string& operation, 
+                                uint64_t memory_used, uint64_t memory_limit = 0) {
+  if (!chat_ctx || !chat_ctx->log_initialized) return;
+  
+  double memory_mb = memory_used / (1024.0 * 1024.0);
+  if (memory_limit > 0) {
+    double limit_mb = memory_limit / (1024.0 * 1024.0);
+    double usage_percent = (memory_used * 100.0) / memory_limit;
+    LOG_INF("[MEM] %s - %.2fMB used (%.1f%% of %.2fMB limit)", 
+            operation.c_str(), memory_mb, usage_percent, limit_mb);
+  } else {
+    LOG_INF("[MEM] %s - %.2fMB used", operation.c_str(), memory_mb);
+  }
+}
+
+// Structured logging for task queue operations
+static void log_task_operation(LlamaChatContext* chat_ctx, const std::string& operation,
+                              int task_id, wasi_nn_task_priority priority = WASI_NN_PRIORITY_NORMAL,
+                              const std::string& additional_info = "") {
+  if (!chat_ctx || !chat_ctx->log_initialized) return;
+  
+  const char* priority_str = "NORMAL";
+  switch (priority) {
+    case WASI_NN_PRIORITY_LOW: priority_str = "LOW"; break;
+    case WASI_NN_PRIORITY_NORMAL: priority_str = "NORMAL"; break;
+    case WASI_NN_PRIORITY_HIGH: priority_str = "HIGH"; break;
+    case WASI_NN_PRIORITY_URGENT: priority_str = "URGENT"; break;
+  }
+  
+  if (additional_info.empty()) {
+    LOG_INF("[TASK] %s - Task %d (Priority: %s)", operation.c_str(), task_id, priority_str);
+  } else {
+    LOG_INF("[TASK] %s - Task %d (Priority: %s) - %s", 
+            operation.c_str(), task_id, priority_str, additional_info.c_str());
+  }
+}
+
 // Implementation of wasi_nn_task_queue methods
-bool wasi_nn_task_queue::enqueue_task(wasi_nn_task &&task)
+bool wasi_nn_task_queue::enqueue_task(wasi_nn_task &&task, LlamaChatContext* ctx)
 {
   std::unique_lock<std::mutex> lock(queue_mutex);
   
   // Check if queue is at capacity
   if (current_size >= max_queue_size) {
     tasks_rejected++;
-    NN_WARN_PRINTF("Task queue full (%d/%d), rejecting task %d", 
-                   current_size, max_queue_size, task.id);
+    if (ctx) {
+      WASI_NN_LOG_WARN(ctx, "Task queue full (%d/%d), rejecting task %d", 
+                       current_size, max_queue_size, task.id);
+    } else {
+      NN_WARN_PRINTF("Task queue full (%d/%d), rejecting task %d", 
+                     current_size, max_queue_size, task.id);
+    }
     return false;
   }
   
@@ -228,15 +395,21 @@ bool wasi_nn_task_queue::enqueue_task(wasi_nn_task &&task)
   current_size++;
   tasks_queued++;
   
-  NN_INFO_PRINTF("Task %d queued with priority %d. Queue size: %d/%d", 
-                 task.id, (int)task.priority, current_size, max_queue_size);
+  // Use advanced logging if available
+  if (ctx) {
+    log_task_operation(ctx, "Task Queued", task.id, task.priority, 
+                      "Queue: " + std::to_string(current_size) + "/" + std::to_string(max_queue_size));
+  } else {
+    NN_INFO_PRINTF("Task %d queued with priority %d. Queue size: %d/%d", 
+                   task.id, (int)task.priority, current_size, max_queue_size);
+  }
   
   // Notify waiting threads
   queue_condition.notify_one();
   return true;
 }
 
-bool wasi_nn_task_queue::dequeue_task(wasi_nn_task &task)
+bool wasi_nn_task_queue::dequeue_task(wasi_nn_task &task, LlamaChatContext* ctx)
 {
   std::unique_lock<std::mutex> lock(queue_mutex);
   
@@ -270,8 +443,15 @@ bool wasi_nn_task_queue::dequeue_task(wasi_nn_task &task)
   }
   
   current_size--;
-  NN_INFO_PRINTF("Dequeued task %d with priority %d. Queue size: %d/%d",
-                 task.id, (int)task.priority, current_size, max_queue_size);
+  
+  // Use advanced logging if available
+  if (ctx) {
+    log_task_operation(ctx, "Task Dequeued", task.id, task.priority,
+                      "Queue: " + std::to_string(current_size) + "/" + std::to_string(max_queue_size));
+  } else {
+    NN_INFO_PRINTF("Dequeued task %d with priority %d. Queue size: %d/%d",
+                   task.id, (int)task.priority, current_size, max_queue_size);
+  }
   
   return true;
 }
@@ -1116,6 +1296,19 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
         {
           chat_ctx->log_file = std::string(cJSON_GetStringValue(log_file));
         }
+        
+        // New Phase 5.1 logging options
+        cJSON *enable_timestamps = cJSON_GetObjectItem(logging, "timestamps");
+        if (cJSON_IsBool(enable_timestamps))
+        {
+          chat_ctx->enable_timestamps = cJSON_IsTrue(enable_timestamps);
+        }
+        
+        cJSON *enable_colors = cJSON_GetObjectItem(logging, "colors");
+        if (cJSON_IsBool(enable_colors))
+        {
+          chat_ctx->enable_colors = cJSON_IsTrue(enable_colors);
+        }
       }
 
       // Performance settings
@@ -1160,7 +1353,7 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
       
       wasi_nn_task task;
       while (chat_ctx->task_queue->running) {
-        if (chat_ctx->task_queue->dequeue_task(task)) {
+        if (chat_ctx->task_queue->dequeue_task(task, chat_ctx)) {
           // Process the task
           NN_INFO_PRINTF("Processing task %d for execution context %d", 
                          task.id, task.exec_ctx);
@@ -1181,28 +1374,35 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
   }
 
   NN_INFO_PRINTF("Llama chat backend initialized successfully");
-  NN_INFO_PRINTF(
+  
+  // Phase 5.1: Initialize advanced logging system
+  initialize_advanced_logging(chat_ctx);
+  
+  // Use enhanced logging for configuration output
+  WASI_NN_LOG_INFO(chat_ctx,
       "Session config: max_sessions=%d, idle_timeout_ms=%d, auto_cleanup=%s",
       chat_ctx->max_sessions, chat_ctx->idle_timeout_ms,
       chat_ctx->auto_cleanup_enabled ? "true" : "false");
-  NN_INFO_PRINTF(
+  WASI_NN_LOG_INFO(chat_ctx,
       "Concurrency config: max_concurrent=%d, queue_size=%d",
       chat_ctx->max_concurrent, chat_ctx->queue_size);
-  NN_INFO_PRINTF(
+  WASI_NN_LOG_INFO(chat_ctx,
       "Task Queue config: timeout=%dms, priority_scheduling=%s, fair_scheduling=%s",
       chat_ctx->default_task_timeout_ms,
       chat_ctx->priority_scheduling_enabled ? "true" : "false",
       chat_ctx->fair_scheduling_enabled ? "true" : "false");
-  NN_INFO_PRINTF(
+  WASI_NN_LOG_INFO(chat_ctx,
       "Memory config: context_shifting=%s, cache_strategy=%s, max_cache_tokens=%d",
       chat_ctx->context_shifting_enabled ? "true" : "false",
       chat_ctx->cache_strategy.c_str(), chat_ctx->max_cache_tokens);
-  NN_INFO_PRINTF(
-      "Logging config: level=%s, enable_debug=%s, file=%s",
+  WASI_NN_LOG_INFO(chat_ctx,
+      "Logging config: level=%s, enable_debug=%s, timestamps=%s, colors=%s, file=%s",
       chat_ctx->log_level.c_str(),
       chat_ctx->enable_debug_log ? "true" : "false",
+      chat_ctx->enable_timestamps ? "true" : "false",
+      chat_ctx->enable_colors ? "true" : "false",
       chat_ctx->log_file.c_str());
-  NN_INFO_PRINTF(
+  WASI_NN_LOG_INFO(chat_ctx,
       "Performance config: batch_processing=%s, batch_size=%d",
       chat_ctx->batch_processing_enabled ? "true" : "false",
       chat_ctx->batch_size);
@@ -1671,7 +1871,7 @@ compute(void *ctx, graph_execution_context exec_ctx)
     task.priority = WASI_NN_PRIORITY_NORMAL;
     
     // Try to enqueue the task
-    if (!chat_ctx->task_queue->enqueue_task(std::move(task)))
+    if (!chat_ctx->task_queue->enqueue_task(std::move(task), chat_ctx))
     {
       NN_WARN_PRINTF("Failed to enqueue task for execution context %d - queue full", exec_ctx);
       return runtime_error;
