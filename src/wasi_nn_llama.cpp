@@ -664,6 +664,18 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
   // Initialize the server context
   chat_ctx->server_ctx.init();
 
+  // Initialize samplers for all slots (crucial for inference)
+  for (auto &slot : chat_ctx->server_ctx.slots) {
+    if (slot.smpl != nullptr) {
+      common_sampler_free(slot.smpl);
+    }
+    slot.smpl = common_sampler_init(chat_ctx->server_ctx.model, slot.params.sampling);
+    if (slot.smpl == nullptr) {
+      NN_ERR_PRINTF("Failed to initialize sampler for slot %d", slot.id);
+      return runtime_error;
+    }
+  }
+
   // Create new session
   graph_execution_context new_exec_ctx = chat_ctx->next_exec_ctx_id++;
   SessionInfo session_info;
@@ -731,6 +743,12 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
     new_msg.role = role;
     new_msg.content = content;
 
+    // Check if chat templates are available
+    if (!chat_ctx->server_ctx.chat_templates.get()) {
+      NN_ERR_PRINTF("Chat templates not initialized");
+      return std::string("Error: Chat templates not available");
+    }
+
     auto formatted = common_chat_format_single(
         chat_ctx->server_ctx.chat_templates.get(), chat_msgs, new_msg, role == "user",
         false // use_jinja
@@ -755,6 +773,12 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
   inputs.messages = chat_msgs;
   inputs.add_generation_prompt = true;
 
+  // Check if chat templates are available before using them
+  if (!chat_ctx->server_ctx.chat_templates.get()) {
+    NN_ERR_PRINTF("Chat templates not initialized for prompt generation");
+    return "Error: Chat templates not available";
+  }
+
   std::string full_prompt =
       common_chat_templates_apply(chat_ctx->server_ctx.chat_templates.get(), inputs)
           .prompt;
@@ -778,6 +802,12 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
   // Generate tokens one by one
   for (int i = 0; i < chat_ctx->server_ctx.params_base.n_predict; ++i)
   {
+    // Verify that slots[0] and its sampler are valid
+    if (chat_ctx->server_ctx.slots.empty() || chat_ctx->server_ctx.slots[0].smpl == nullptr) {
+      NN_ERR_PRINTF("Invalid slot or sampler state");
+      return "Error: Invalid sampler state";
+    }
+
     llama_token new_token =
         common_sampler_sample(chat_ctx->server_ctx.slots[0].smpl, chat_ctx->server_ctx.ctx, -1);
 
