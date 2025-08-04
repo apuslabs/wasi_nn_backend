@@ -154,6 +154,9 @@ extern "C" {
  init_execution_context(void *ctx, graph g, graph_execution_context *exec_ctx);
  
  __attribute__((visibility("default"))) wasi_nn_error
+ init_execution_context_with_session_id(void *ctx, const char *session_id, graph_execution_context *exec_ctx);
+ 
+ __attribute__((visibility("default"))) wasi_nn_error
  set_input(void *ctx, graph_execution_context exec_ctx, uint32_t index,
 	  tensor *wasi_nn_tensor);
  

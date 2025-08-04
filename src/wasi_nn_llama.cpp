@@ -2384,12 +2384,38 @@ static void auto_cleanup_sessions(LlamaChatContext *chat_ctx)
   }
 }
 
+// Original function for WASI-NN compatibility (kept for backward compatibility)
 __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
     void *ctx, graph g, graph_execution_context *exec_ctx)
+{
+  // Delegate to the session-aware version with a default session ID
+  return init_execution_context_with_session_id(ctx, "default_session", exec_ctx);
+}
+
+// New function that properly handles session IDs (matches NIF expectations)
+__attribute__((visibility("default"))) wasi_nn_error init_execution_context_with_session_id(
+    void *ctx, const char *session_id, graph_execution_context *exec_ctx)
 {
   LlamaChatContext *chat_ctx = (LlamaChatContext *)ctx;
   if (!chat_ctx || !chat_ctx->server_ctx.model)
     return invalid_argument;
+
+  if (!session_id) {
+    NN_ERR_PRINTF("Session ID cannot be null");
+    return invalid_argument;
+  }
+
+  std::string session_id_str(session_id);
+
+  // Check if session already exists
+  for (auto &pair : chat_ctx->sessions) {
+    if (pair.second.session_id == session_id_str) {
+      *exec_ctx = pair.first;
+      NN_INFO_PRINTF("Reusing existing session '%s' with execution context %d", 
+                     session_id, pair.first);
+      return success;
+    }
+  }
 
   // Check concurrency limit
   if (chat_ctx->active_sessions + 1 > chat_ctx->max_concurrent)
@@ -2425,10 +2451,10 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
     }
   }
 
-  // Create new session
+  // Create new session with provided session ID
   graph_execution_context new_exec_ctx = chat_ctx->next_exec_ctx_id++;
   SessionInfo session_info;
-  session_info.session_id = "session_" + std::to_string(new_exec_ctx);
+  session_info.session_id = session_id_str;  // Use the provided session ID
   session_info.last_activity = std::chrono::steady_clock::now();
 
   chat_ctx->sessions[new_exec_ctx] = std::move(session_info);
@@ -2437,8 +2463,8 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context(
   *exec_ctx = new_exec_ctx;
 
   NN_INFO_PRINTF(
-      "Execution context %d initialized. Active sessions: %d, Max concurrent: %d",
-      new_exec_ctx, chat_ctx->active_sessions, chat_ctx->max_concurrent);
+      "Execution context %d initialized for session '%s'. Active sessions: %d, Max concurrent: %d",
+      new_exec_ctx, session_id, chat_ctx->active_sessions, chat_ctx->max_concurrent);
 
   return success;
 }
@@ -2658,8 +2684,15 @@ static std::string run_inference_for_session_with_params(LlamaChatContext *chat_
 
   WASI_NN_LOG_DEBUG(chat_ctx, "Processing prompt for session %d: %s", exec_ctx, prompt.c_str());
 
-  // Clear KV cache for session isolation (as per user's requirement)
-  llama_memory_clear(llama_get_memory(chat_ctx->server_ctx.ctx), true);
+  // Only clear KV cache if this is a new session (empty chat history)
+  // This preserves conversation context for ongoing sessions
+  if (chat_msgs.size() <= 1) {  // Only user message just added
+    WASI_NN_LOG_DEBUG(chat_ctx, "New session detected, clearing KV cache for session %d", exec_ctx);
+    llama_memory_clear(llama_get_memory(chat_ctx->server_ctx.ctx), true);
+  } else {
+    WASI_NN_LOG_DEBUG(chat_ctx, "Continuing session %d with %zu messages, preserving KV cache", 
+                       exec_ctx, chat_msgs.size());
+  }
 
   // Tokenize the complete conversation history
   common_chat_templates_inputs inputs;
