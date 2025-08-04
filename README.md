@@ -93,6 +93,16 @@ The project follows a structured 7-phase development approach:
 
 Each phase builds upon previous work while maintaining full backward compatibility and comprehensive testing.
 
+## 📚 Documentation / 文档
+
+**Comprehensive documentation is now available in the `docs/` directory:**
+
+### Quick Access / 快速访问
+- **[Complete User Guide](docs/USER_GUIDE.md)** - Installation, usage, and integration examples
+  **完整用户指南** - 安装、使用和集成示例
+- **[Parameter Reference](docs/PARAMETER_REFERENCE.md)** - Detailed parameter documentation
+  **参数参考** - 详细的参数文档
+
 ### Key Features
 
 - WASI-NN API compliance
