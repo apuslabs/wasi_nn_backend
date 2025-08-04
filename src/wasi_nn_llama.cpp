@@ -2675,7 +2675,6 @@ static std::string run_inference_for_session_with_params(LlamaChatContext *chat_
     );
 
     chat_msgs.push_back(new_msg);
-    NN_DBG_PRINTF("Formatted message: '%s'", formatted.c_str());
     return formatted;
   };
 
@@ -2759,7 +2758,7 @@ static std::string run_inference_for_session_with_params(LlamaChatContext *chat_
     }
     
     if (should_stop_eos) {
-      WASI_NN_LOG_DEBUG(chat_ctx, "Generation stopped at EOS token");
+    //   WASI_NN_LOG_DEBUG(chat_ctx, "Generation stopped at EOS token");
       break;
     }
 
