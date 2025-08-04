@@ -94,7 +94,7 @@ struct wasi_nn_runtime_params
   
   // Generation control
   int32_t max_tokens = -1;
-  int32_t seed = -1;
+  int32_t seed = 1234; // Default seed, can be overridden
   bool ignore_eos = false;  // Default to false, but can be overridden
   bool ignore_eos_set = false;  // Flag to indicate if ignore_eos was explicitly set
   
