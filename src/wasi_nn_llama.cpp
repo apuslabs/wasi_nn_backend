@@ -154,7 +154,6 @@ struct LlamaChatContext
   
   // Memory monitoring
   std::atomic<uint64_t> current_memory_usage{0};
-  std::atomic<uint64_t> peak_memory_usage{0};
   std::atomic<uint32_t> cache_hits{0};
   std::atomic<uint32_t> cache_misses{0};
 
@@ -172,7 +171,6 @@ struct LlamaChatContext
   // Phase 5.2: Model Hot-Swapping
   std::string current_model_path;
   std::string current_model_version;
-  std::string current_model_hash;
   bool model_swapping_in_progress;
   std::mutex model_swap_mutex;
   common_params backup_params;
@@ -195,10 +193,10 @@ struct LlamaChatContext
         n_keep_tokens(256), n_discard_tokens(0), memory_pressure_threshold(0.85f),
         enable_partial_cache_deletion(true), enable_token_cache_reuse(true),
         cache_deletion_strategy("lru"), max_memory_mb(0),
-        current_memory_usage(0), peak_memory_usage(0), cache_hits(0), cache_misses(0),
+        current_memory_usage(0), cache_hits(0), cache_misses(0),
         log_level("info"), enable_debug_log(false), enable_timestamps(true), enable_colors(false),
         log_instance(nullptr), log_initialized(false),
-        current_model_path(""), current_model_version(""), current_model_hash(""),
+        current_model_path(""), current_model_version(""),
         model_swapping_in_progress(false), model_context_length(0), model_vocab_size(0),
         model_architecture(""), model_name(""),
         batch_processing_enabled(true), batch_size(512) {}
@@ -544,35 +542,6 @@ static bool initialize_advanced_logging(LlamaChatContext* chat_ctx) {
   return true;
 }
 
-// Structured logging for performance metrics
-static void log_performance_metrics(LlamaChatContext* chat_ctx, const std::string& operation, 
-                                   int64_t duration_us, const std::string& additional_info = "") {
-  if (!chat_ctx || !chat_ctx->log_initialized) return;
-  
-  double duration_ms = duration_us / 1000.0;
-  if (additional_info.empty()) {
-    LOG_INF("[PERF] %s completed in %.2fms", operation.c_str(), duration_ms);
-  } else {
-    LOG_INF("[PERF] %s completed in %.2fms - %s", operation.c_str(), duration_ms, additional_info.c_str());
-  }
-}
-
-// Structured logging for memory operations
-static void log_memory_operation(LlamaChatContext* chat_ctx, const std::string& operation, 
-                                uint64_t memory_used, uint64_t memory_limit = 0) {
-  if (!chat_ctx || !chat_ctx->log_initialized) return;
-  
-  double memory_mb = memory_used / (1024.0 * 1024.0);
-  if (memory_limit > 0) {
-    double limit_mb = memory_limit / (1024.0 * 1024.0);
-    double usage_percent = (memory_used * 100.0) / memory_limit;
-    LOG_INF("[MEM] %s - %.2fMB used (%.1f%% of %.2fMB limit)", 
-            operation.c_str(), memory_mb, usage_percent, limit_mb);
-  } else {
-    LOG_INF("[MEM] %s - %.2fMB used", operation.c_str(), memory_mb);
-  }
-}
-
 // Structured logging for task queue operations
 static void log_task_operation(LlamaChatContext* chat_ctx, const std::string& operation,
                               int task_id, wasi_nn_task_priority priority = WASI_NN_PRIORITY_NORMAL,
@@ -737,9 +706,23 @@ void wasi_nn_task_queue::get_queue_status(uint32_t &queued, uint32_t &active, ui
 
 // Memory monitoring and pressure detection
 static uint64_t get_current_memory_usage() {
-  // This is a simplified implementation - in practice, you'd use system-specific calls
-  // For now, we'll estimate based on context size and active sessions
-  return 0; // Placeholder
+  // Simple implementation using /proc/self/status on Linux
+  FILE* file = fopen("/proc/self/status", "r");
+  if (!file) {
+    return 0;
+  }
+  
+  char line[256];
+  uint64_t rss_kb = 0;
+  
+  while (fgets(line, sizeof(line), file)) {
+    if (sscanf(line, "VmRSS: %lu kB", &rss_kb) == 1) {
+      break;
+    }
+  }
+  
+  fclose(file);
+  return rss_kb * 1024; // Convert to bytes
 }
 
 static bool check_memory_pressure(LlamaChatContext* chat_ctx) {
@@ -939,73 +922,161 @@ static wasi_nn_error handle_memory_pressure(LlamaChatContext* chat_ctx) {
   return success;
 }
 
-// Helper function to parse JSON config into common_params
+// Enhanced helper function for safe JSON value extraction (similar to server.cpp json_value)
+template <typename T>
+static T cjson_get_value(cJSON *root, const char *key, const T &default_value);
+
+// Specializations for different types
+template <>
+double cjson_get_value<double>(cJSON *root, const char *key, const double &default_value)
+{
+  cJSON *item = cJSON_GetObjectItem(root, key);
+  if (cJSON_IsNumber(item))
+  {
+    return cJSON_GetNumberValue(item);
+  }
+  return default_value;
+}
+
+template <>
+float cjson_get_value<float>(cJSON *root, const char *key, const float &default_value)
+{
+  cJSON *item = cJSON_GetObjectItem(root, key);
+  if (cJSON_IsNumber(item))
+  {
+    return (float)cJSON_GetNumberValue(item);
+  }
+  return default_value;
+}
+
+template <>
+int32_t cjson_get_value<int32_t>(cJSON *root, const char *key, const int32_t &default_value)
+{
+  cJSON *item = cJSON_GetObjectItem(root, key);
+  if (cJSON_IsNumber(item))
+  {
+    return (int32_t)cJSON_GetNumberValue(item);
+  }
+  return default_value;
+}
+
+template <>
+uint32_t cjson_get_value<uint32_t>(cJSON *root, const char *key, const uint32_t &default_value)
+{
+  cJSON *item = cJSON_GetObjectItem(root, key);
+  if (cJSON_IsNumber(item))
+  {
+    return (uint32_t)cJSON_GetNumberValue(item);
+  }
+  return default_value;
+}
+
+template <>
+bool cjson_get_value<bool>(cJSON *root, const char *key, const bool &default_value)
+{
+  cJSON *item = cJSON_GetObjectItem(root, key);
+  if (cJSON_IsBool(item))
+  {
+    return cJSON_IsTrue(item);
+  }
+  return default_value;
+}
+
+template <>
+std::string cjson_get_value<std::string>(cJSON *root, const char *key, const std::string &default_value)
+{
+  cJSON *item = cJSON_GetObjectItem(root, key);
+  if (cJSON_IsString(item))
+  {
+    return std::string(cJSON_GetStringValue(item));
+  }
+  return default_value;
+}
+
+// Enhanced parameter parsing function (based on server.cpp params_from_json_cmpl)
 static void parse_config_to_params(const char *config_json,
                                    common_params &params,
                                    LlamaChatContext *chat_ctx)
 {
-  // Set defaults (similar to main.cpp)
+  // Initialize with sensible defaults (server.cpp style)
   params = common_params();
   params.conversation_mode = COMMON_CONVERSATION_MODE_ENABLED;
   params.enable_chat_template = true;
+  
+  // Model defaults
   params.n_predict = 512;
-  params.sampling.temp = 0.7f;
-  params.sampling.top_p = 0.95f;
-  params.sampling.penalty_repeat = 1.10f;
   params.n_ctx = 2048;
   params.n_batch = 512;
+  params.n_gpu_layers = 0;
   params.cpuparams.n_threads = 8;
   params.cpuparams_batch.n_threads = 8;
-  
-  // GPU acceleration defaults - explicitly set to enable GPU usage
-  params.n_gpu_layers = 0;  // Will be overridden by config if specified
+
+  // Sampling defaults (matching server.cpp defaults)
+  params.sampling.temp = 0.7f;
+  params.sampling.top_p = 0.95f;
+  params.sampling.top_k = -1;
+  params.sampling.min_p = 0.0f;
+  params.sampling.typ_p = 1.0f;
+  params.sampling.penalty_repeat = 1.10f;
+  params.sampling.penalty_freq = 0.0f;
+  params.sampling.penalty_present = 0.0f;
+  params.sampling.penalty_last_n = -1;  // Will be auto-adjusted
+  params.sampling.ignore_eos = false;
+  params.sampling.seed = LLAMA_DEFAULT_SEED;
+  params.sampling.n_probs = 0;
+  params.sampling.min_keep = 1;
+
+  // DRY sampling defaults
+  params.sampling.dry_multiplier = 0.0f;
+  params.sampling.dry_base = 1.75f;
+  params.sampling.dry_allowed_length = 2;
+  params.sampling.dry_penalty_last_n = -1;  // Will be auto-adjusted
+
+  // Dynatemp defaults
+  params.sampling.dynatemp_range = 0.0f;
+  params.sampling.dynatemp_exponent = 1.0f;
+
+  // Mirostat defaults
+  params.sampling.mirostat = 0;
+  params.sampling.mirostat_tau = 5.0f;
+  params.sampling.mirostat_eta = 0.1f;
 
   if (!config_json)
+  {
+    if (chat_ctx) {
+      WASI_NN_LOG_INFO(chat_ctx, "No configuration provided, using defaults");
+    }
     return;
+  }
 
   cJSON *root = cJSON_Parse(config_json);
   if (!root)
   {
-    NN_WARN_PRINTF("Failed to parse config JSON, using defaults");
+    if (chat_ctx) {
+      WASI_NN_LOG_ERROR(chat_ctx, "Failed to parse configuration JSON");
+    }
     return;
   }
 
-  cJSON *item = nullptr;
-
-  // Helper function to parse model parameters from either root or model object
+  // Parse model parameters with comprehensive error handling
   auto parse_model_params = [&](cJSON *config_obj) {
-    if ((item = cJSON_GetObjectItem(config_obj, "n_predict")))
-    {
-      params.n_predict = (int32_t)cJSON_GetNumberValue(item);
-    }
-
-    if ((item = cJSON_GetObjectItem(config_obj, "n_gpu_layers")))
-    {
-      params.n_gpu_layers = (int32_t)cJSON_GetNumberValue(item);
-    }
-
-    if ((item = cJSON_GetObjectItem(config_obj, "ctx_size")))
-    {
-      params.n_ctx = (uint32_t)cJSON_GetNumberValue(item);
-    }
-
-    if ((item = cJSON_GetObjectItem(config_obj, "batch_size")))
-    {
-      params.n_batch = (uint32_t)cJSON_GetNumberValue(item);
-    }
-
-    if ((item = cJSON_GetObjectItem(config_obj, "threads")))
-    {
-      params.cpuparams.n_threads = (uint32_t)cJSON_GetNumberValue(item);
-      params.cpuparams_batch.n_threads = (uint32_t)cJSON_GetNumberValue(item);
-    }
+    params.n_predict = cjson_get_value(config_obj, "n_predict", params.n_predict);
+    params.n_predict = cjson_get_value(config_obj, "max_tokens", params.n_predict);  // OpenAI compatibility
+    params.n_gpu_layers = cjson_get_value(config_obj, "n_gpu_layers", params.n_gpu_layers);
+    params.n_ctx = cjson_get_value(config_obj, "ctx_size", params.n_ctx);
+    params.n_ctx = cjson_get_value(config_obj, "n_ctx", params.n_ctx);  // Alternative name
+    params.n_batch = cjson_get_value(config_obj, "batch_size", params.n_batch);
+    params.n_batch = cjson_get_value(config_obj, "n_batch", params.n_batch);  // Alternative name
+    
+    uint32_t threads = cjson_get_value(config_obj, "threads", params.cpuparams.n_threads);
+    params.cpuparams.n_threads = threads;
+    params.cpuparams_batch.n_threads = threads;
   };
 
-  // Parse model parameters - first check for new nested structure
+  // Parse nested model configuration or legacy flat structure
   cJSON *model_config = cJSON_GetObjectItem(root, "model");
   if (cJSON_IsObject(model_config))
   {
-    // New nested model configuration
     parse_model_params(model_config);
   }
   else
@@ -1014,414 +1085,183 @@ static void parse_config_to_params(const char *config_json,
     parse_model_params(root);
   }
 
-  // Simple sampling parameters (backward compatibility)
-  if ((item = cJSON_GetObjectItem(root, "temp")))
-  {
-    params.sampling.temp = (float)cJSON_GetNumberValue(item);
-  }
+  // Parse sampling parameters - Legacy flat structure first (backward compatibility)
+  params.sampling.temp = cjson_get_value(root, "temp", params.sampling.temp);
+  params.sampling.temp = cjson_get_value(root, "temperature", params.sampling.temp);  // OpenAI compatibility
+  params.sampling.top_p = cjson_get_value(root, "top_p", params.sampling.top_p);
+  params.sampling.penalty_repeat = cjson_get_value(root, "repeat_penalty", params.sampling.penalty_repeat);
 
-  if ((item = cJSON_GetObjectItem(root, "top_p")))
-  {
-    params.sampling.top_p = (float)cJSON_GetNumberValue(item);
-  }
-
-  if ((item = cJSON_GetObjectItem(root, "repeat_penalty")))
-  {
-    params.sampling.penalty_repeat = (float)cJSON_GetNumberValue(item);
-  }
-
-  // Advanced sampling parameters
+  // Parse nested sampling configuration (server.cpp style)
   cJSON *sampling = cJSON_GetObjectItem(root, "sampling");
   if (cJSON_IsObject(sampling))
   {
-    cJSON *temp = cJSON_GetObjectItem(sampling, "temp");
-    if (cJSON_IsNumber(temp))
-    {
-      params.sampling.temp = (float)cJSON_GetNumberValue(temp);
-    }
+    // Core sampling parameters
+    params.sampling.temp = cjson_get_value(sampling, "temp", params.sampling.temp);
+    params.sampling.temp = cjson_get_value(sampling, "temperature", params.sampling.temp);
+    params.sampling.top_p = cjson_get_value(sampling, "top_p", params.sampling.top_p);
+    params.sampling.top_k = cjson_get_value(sampling, "top_k", params.sampling.top_k);
+    params.sampling.min_p = cjson_get_value(sampling, "min_p", params.sampling.min_p);
+    params.sampling.typ_p = cjson_get_value(sampling, "typical_p", params.sampling.typ_p);
 
-    cJSON *top_p = cJSON_GetObjectItem(sampling, "top_p");
-    if (cJSON_IsNumber(top_p))
-    {
-      params.sampling.top_p = (float)cJSON_GetNumberValue(top_p);
-    }
+    // Penalty parameters
+    params.sampling.penalty_repeat = cjson_get_value(sampling, "repeat_penalty", params.sampling.penalty_repeat);
+    params.sampling.penalty_present = cjson_get_value(sampling, "presence_penalty", params.sampling.penalty_present);
+    params.sampling.penalty_freq = cjson_get_value(sampling, "frequency_penalty", params.sampling.penalty_freq);
+    params.sampling.penalty_last_n = cjson_get_value(sampling, "penalty_last_n", params.sampling.penalty_last_n);
+    params.sampling.penalty_last_n = cjson_get_value(sampling, "repeat_last_n", params.sampling.penalty_last_n);  // OpenAI compatibility
 
-    cJSON *top_k = cJSON_GetObjectItem(sampling, "top_k");
-    if (cJSON_IsNumber(top_k))
-    {
-      params.sampling.top_k = (int32_t)cJSON_GetNumberValue(top_k);
-    }
+    // DRY sampling parameters (advanced repetition suppression)
+    params.sampling.dry_multiplier = cjson_get_value(sampling, "dry_multiplier", params.sampling.dry_multiplier);
+    params.sampling.dry_base = cjson_get_value(sampling, "dry_base", params.sampling.dry_base);
+    params.sampling.dry_allowed_length = cjson_get_value(sampling, "dry_allowed_length", params.sampling.dry_allowed_length);
+    params.sampling.dry_penalty_last_n = cjson_get_value(sampling, "dry_penalty_last_n", params.sampling.dry_penalty_last_n);
 
-    cJSON *min_p = cJSON_GetObjectItem(sampling, "min_p");
-    if (cJSON_IsNumber(min_p))
-    {
-      params.sampling.min_p = (float)cJSON_GetNumberValue(min_p);
-    }
+    // Dynamic temperature parameters
+    params.sampling.dynatemp_range = cjson_get_value(sampling, "dynatemp_range", params.sampling.dynatemp_range);
+    params.sampling.dynatemp_exponent = cjson_get_value(sampling, "dynatemp_exponent", params.sampling.dynatemp_exponent);
 
-    // Note: tfs_z might not be available in this version
-    // cJSON *tfs_z = cJSON_GetObjectItem(sampling, "tfs_z");
-    // if (cJSON_IsNumber(tfs_z))
-    // {
-    //   params.sampling.tfs_z = (float)cJSON_GetNumberValue(tfs_z);
-    // }
+    // Mirostat parameters
+    params.sampling.mirostat = cjson_get_value(sampling, "mirostat", params.sampling.mirostat);
+    params.sampling.mirostat_tau = cjson_get_value(sampling, "mirostat_tau", params.sampling.mirostat_tau);
+    params.sampling.mirostat_eta = cjson_get_value(sampling, "mirostat_eta", params.sampling.mirostat_eta);
 
-    cJSON *typical_p = cJSON_GetObjectItem(sampling, "typical_p");
-    if (cJSON_IsNumber(typical_p))
-    {
-      params.sampling.typ_p = (float)cJSON_GetNumberValue(typical_p);
-    }
+    // Other sampling parameters
+    params.sampling.seed = cjson_get_value(sampling, "seed", params.sampling.seed);
+    params.sampling.n_probs = cjson_get_value(sampling, "n_probs", params.sampling.n_probs);
+    params.sampling.n_probs = cjson_get_value(sampling, "logprobs", params.sampling.n_probs);  // OpenAI compatibility
+    params.sampling.min_keep = cjson_get_value(sampling, "min_keep", params.sampling.min_keep);
+    params.sampling.ignore_eos = cjson_get_value(sampling, "ignore_eos", params.sampling.ignore_eos);
 
-    cJSON *repeat_penalty = cJSON_GetObjectItem(sampling, "repeat_penalty");
-    if (cJSON_IsNumber(repeat_penalty))
-    {
-      params.sampling.penalty_repeat = (float)cJSON_GetNumberValue(repeat_penalty);
-    }
+    // Grammar parameters
+    params.sampling.grammar = cjson_get_value(sampling, "grammar", params.sampling.grammar);
+    params.sampling.grammar_lazy = cjson_get_value(sampling, "grammar_lazy", params.sampling.grammar_lazy);
 
-    cJSON *presence_penalty = cJSON_GetObjectItem(sampling, "presence_penalty");
-    if (cJSON_IsNumber(presence_penalty))
+    // DRY sequence breakers (server.cpp style)
+    cJSON *dry_sequence_breakers = cJSON_GetObjectItem(sampling, "dry_sequence_breakers");
+    if (cJSON_IsArray(dry_sequence_breakers))
     {
-      params.sampling.penalty_present = (float)cJSON_GetNumberValue(presence_penalty);
-    }
-
-    cJSON *frequency_penalty = cJSON_GetObjectItem(sampling, "frequency_penalty");
-    if (cJSON_IsNumber(frequency_penalty))
-    {
-      params.sampling.penalty_freq = (float)cJSON_GetNumberValue(frequency_penalty);
-    }
-
-    cJSON *penalty_last_n = cJSON_GetObjectItem(sampling, "penalty_last_n");
-    if (cJSON_IsNumber(penalty_last_n))
-    {
-      params.sampling.penalty_last_n = (int32_t)cJSON_GetNumberValue(penalty_last_n);
-    }
-
-    cJSON *mirostat = cJSON_GetObjectItem(sampling, "mirostat");
-    if (cJSON_IsNumber(mirostat))
-    {
-      params.sampling.mirostat = (int32_t)cJSON_GetNumberValue(mirostat);
-    }
-
-    cJSON *mirostat_tau = cJSON_GetObjectItem(sampling, "mirostat_tau");
-    if (cJSON_IsNumber(mirostat_tau))
-    {
-      params.sampling.mirostat_tau = (float)cJSON_GetNumberValue(mirostat_tau);
-    }
-
-    cJSON *mirostat_eta = cJSON_GetObjectItem(sampling, "mirostat_eta");
-    if (cJSON_IsNumber(mirostat_eta))
-    {
-      params.sampling.mirostat_eta = (float)cJSON_GetNumberValue(mirostat_eta);
-    }
-
-    cJSON *seed = cJSON_GetObjectItem(sampling, "seed");
-    if (cJSON_IsNumber(seed))
-    {
-      params.sampling.seed = (int32_t)cJSON_GetNumberValue(seed);
+      params.sampling.dry_sequence_breakers.clear();
+      int array_size = cJSON_GetArraySize(dry_sequence_breakers);
+      for (int i = 0; i < array_size; i++)
+      {
+        cJSON *breaker_item = cJSON_GetArrayItem(dry_sequence_breakers, i);
+        if (cJSON_IsString(breaker_item))
+        {
+          params.sampling.dry_sequence_breakers.push_back(std::string(cJSON_GetStringValue(breaker_item)));
+        }
+      }
+      
+      if (params.sampling.dry_sequence_breakers.empty())
+      {
+        if (chat_ctx) {
+          WASI_NN_LOG_ERROR(chat_ctx, "Error: dry_sequence_breakers must be a non-empty array of strings");
+        }
+        cJSON_Delete(root);
+        return;
+      }
     }
   }
 
-  // Stopping criteria
+  // Parse stopping criteria (enhanced version)
   cJSON *stopping = cJSON_GetObjectItem(root, "stopping");
   if (cJSON_IsObject(stopping))
   {
-    cJSON *max_tokens = cJSON_GetObjectItem(stopping, "max_tokens");
-    if (cJSON_IsNumber(max_tokens))
-    {
-      params.n_predict = (int32_t)cJSON_GetNumberValue(max_tokens);
-    }
+    params.n_predict = cjson_get_value(stopping, "max_tokens", params.n_predict);
+    params.sampling.ignore_eos = cjson_get_value(stopping, "ignore_eos", params.sampling.ignore_eos);
 
-    // Use max_params instead of max_gen_time if available
-    cJSON *max_time_ms = cJSON_GetObjectItem(stopping, "max_time_ms");
-    if (cJSON_IsNumber(max_time_ms))
-    {
-      // Convert milliseconds to seconds
-      // Note: This field might not exist in this version of the library
-      // params.max_gen_time = (float)cJSON_GetNumberValue(max_time_ms) / 1000.0f;
-    }
-
-    cJSON *ignore_eos = cJSON_GetObjectItem(stopping, "ignore_eos");
-    if (cJSON_IsBool(ignore_eos))
-    {
-      params.sampling.ignore_eos = cJSON_IsTrue(ignore_eos);
-    }
-
-    // Handle stop sequences - Basic stop words
+    // Parse stop sequences (server.cpp style)
     cJSON *stop = cJSON_GetObjectItem(stopping, "stop");
     if (cJSON_IsArray(stop))
     {
-      // Clear existing antiprompt sequences for basic stop words
       params.antiprompt.clear();
-      
       int array_size = cJSON_GetArraySize(stop);
       for (int i = 0; i < array_size; i++)
       {
         cJSON *stop_item = cJSON_GetArrayItem(stop, i);
         if (cJSON_IsString(stop_item))
         {
-          // Add to antiprompt for basic string matching (server.cpp style)
-          params.antiprompt.push_back(std::string(cJSON_GetStringValue(stop_item)));
-        }
-      }
-    }
-
-    // Phase 5.3: Advanced Stopping Criteria Implementation
-    
-    // Handle advanced grammar triggers
-    cJSON *grammar_triggers = cJSON_GetObjectItem(stopping, "grammar_triggers");
-    if (cJSON_IsArray(grammar_triggers))
-    {
-      // Clear existing grammar triggers
-      params.sampling.grammar_triggers.clear();
-      
-      int array_size = cJSON_GetArraySize(grammar_triggers);
-      for (int i = 0; i < array_size; i++)
-      {
-        cJSON *trigger_item = cJSON_GetArrayItem(grammar_triggers, i);
-        if (cJSON_IsObject(trigger_item))
-        {
-          common_grammar_trigger trigger;
-          
-          // Parse trigger type
-          cJSON *type = cJSON_GetObjectItem(trigger_item, "type");
-          if (cJSON_IsString(type))
+          std::string stop_word = cJSON_GetStringValue(stop_item);
+          if (!stop_word.empty())
           {
-            std::string type_str = cJSON_GetStringValue(type);
-            if (type_str == "token")
-            {
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
-            }
-            else if (type_str == "word")
-            {
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_WORD;
-            }
-            else if (type_str == "pattern")
-            {
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;
-            }
-            else if (type_str == "pattern_full")
-            {
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL;
-            }
-            else
-            {
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN; // Default to pattern
-            }
-          }
-          else
-          {
-            trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN; // Default to pattern
-          }
-          
-          // Parse trigger value
-          cJSON *value = cJSON_GetObjectItem(trigger_item, "value");
-          if (cJSON_IsString(value))
-          {
-            trigger.value = std::string(cJSON_GetStringValue(value));
-          }
-          
-          // Parse token (for TOKEN type triggers)
-          cJSON *token = cJSON_GetObjectItem(trigger_item, "token");
-          if (cJSON_IsNumber(token) && trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN)
-          {
-            trigger.token = (llama_token)cJSON_GetNumberValue(token);
-          }
-          
-          params.sampling.grammar_triggers.push_back(trigger);
-        }
-        else if (cJSON_IsString(trigger_item))
-        {
-          // Simple string trigger - convert to pattern type
-          common_grammar_trigger trigger;
-          trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;
-          trigger.value = std::string(cJSON_GetStringValue(trigger_item));
-          params.sampling.grammar_triggers.push_back(trigger);
-        }
-      }
-    }
-
-    // Handle context-aware stopping 
-    cJSON *context_aware = cJSON_GetObjectItem(stopping, "context_aware");
-    if (cJSON_IsBool(context_aware) && cJSON_IsTrue(context_aware))
-    {
-      // Enable context-aware stopping - this will be handled during inference
-      if (chat_ctx)
-      {
-        WASI_NN_LOG_INFO(chat_ctx, "Context-aware stopping enabled");
-      }
-    }
-
-    // Handle dynamic timeout configuration
-    cJSON *dynamic_timeout = cJSON_GetObjectItem(stopping, "dynamic_timeout");
-    if (cJSON_IsObject(dynamic_timeout))
-    {
-      // Base timeout in milliseconds
-      cJSON *base_timeout = cJSON_GetObjectItem(dynamic_timeout, "base_ms");
-      if (cJSON_IsNumber(base_timeout) && chat_ctx)
-      {
-        // Store base timeout for dynamic adjustment
-        WASI_NN_LOG_INFO(chat_ctx, "Dynamic timeout base: %.0f ms", cJSON_GetNumberValue(base_timeout));
-      }
-      
-      // Scaling factor based on token count
-      cJSON *token_scale = cJSON_GetObjectItem(dynamic_timeout, "token_scale");
-      if (cJSON_IsNumber(token_scale) && chat_ctx)
-      {
-        WASI_NN_LOG_INFO(chat_ctx, "Dynamic timeout token scale: %.3f", cJSON_GetNumberValue(token_scale));
-      }
-      
-      // Maximum timeout limit
-      cJSON *max_timeout = cJSON_GetObjectItem(dynamic_timeout, "max_ms");
-      if (cJSON_IsNumber(max_timeout) && chat_ctx)
-      {
-        WASI_NN_LOG_INFO(chat_ctx, "Dynamic timeout maximum: %.0f ms", cJSON_GetNumberValue(max_timeout));
-      }
-    }
-
-    // Handle token-based stopping conditions
-    cJSON *token_conditions = cJSON_GetObjectItem(stopping, "token_conditions");
-    if (cJSON_IsArray(token_conditions))
-    {
-      int array_size = cJSON_GetArraySize(token_conditions);
-      for (int i = 0; i < array_size; i++)
-      {
-        cJSON *condition = cJSON_GetArrayItem(token_conditions, i);
-        if (cJSON_IsObject(condition))
-        {
-          cJSON *token_id = cJSON_GetObjectItem(condition, "token_id");
-          cJSON *mode = cJSON_GetObjectItem(condition, "mode");
-          
-          if (cJSON_IsNumber(token_id) && cJSON_IsString(mode))
-          {
-            llama_token token = (llama_token)cJSON_GetNumberValue(token_id);
-            std::string mode_str = cJSON_GetStringValue(mode);
-            
-            if (mode_str == "stop_on_token")
-            {
-              // Create a token-based grammar trigger
-              common_grammar_trigger trigger;
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
-              trigger.token = token;
-              trigger.value = "token_" + std::to_string(token);
-              params.sampling.grammar_triggers.push_back(trigger);
-              
-              if (chat_ctx)
-              {
-                WASI_NN_LOG_DEBUG(chat_ctx, "Added token stopping condition for token ID: %d", token);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Handle pattern-based stopping conditions with regex support
-    cJSON *pattern_conditions = cJSON_GetObjectItem(stopping, "pattern_conditions");
-    if (cJSON_IsArray(pattern_conditions))
-    {
-      int array_size = cJSON_GetArraySize(pattern_conditions);
-      for (int i = 0; i < array_size; i++)
-      {
-        cJSON *pattern_obj = cJSON_GetArrayItem(pattern_conditions, i);
-        if (cJSON_IsObject(pattern_obj))
-        {
-          cJSON *pattern = cJSON_GetObjectItem(pattern_obj, "pattern");
-          cJSON *match_type = cJSON_GetObjectItem(pattern_obj, "match_type");
-          
-          if (cJSON_IsString(pattern))
-          {
-            std::string pattern_str = cJSON_GetStringValue(pattern);
-            std::string match_type_str = cJSON_IsString(match_type) ? cJSON_GetStringValue(match_type) : "full";
-            
-            common_grammar_trigger trigger;
-            if (match_type_str == "partial")
-            {
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN;
-            }
-            else
-            {
-              trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN_FULL;
-            }
-            trigger.value = pattern_str;
-            params.sampling.grammar_triggers.push_back(trigger);
-            
-            if (chat_ctx)
-            {
-              WASI_NN_LOG_DEBUG(chat_ctx, "Added pattern stopping condition: %s (type: %s)", 
-                              pattern_str.c_str(), match_type_str.c_str());
-            }
-          }
-        }
-      }
-    }
-
-    // Handle semantic stopping conditions
-    cJSON *semantic_conditions = cJSON_GetObjectItem(stopping, "semantic_conditions");
-    if (cJSON_IsArray(semantic_conditions))
-    {
-      int array_size = cJSON_GetArraySize(semantic_conditions);
-      for (int i = 0; i < array_size; i++)
-      {
-        cJSON *semantic_obj = cJSON_GetArrayItem(semantic_conditions, i);
-        if (cJSON_IsObject(semantic_obj))
-        {
-          cJSON *condition_type = cJSON_GetObjectItem(semantic_obj, "type");
-          cJSON *threshold = cJSON_GetObjectItem(semantic_obj, "threshold");
-          
-          if (cJSON_IsString(condition_type))
-          {
-            std::string type_str = cJSON_GetStringValue(condition_type);
-            float threshold_val = cJSON_IsNumber(threshold) ? (float)cJSON_GetNumberValue(threshold) : 0.8f;
-            
-            if (type_str == "completion_detection")
-            {
-              if (chat_ctx)
-              {
-                WASI_NN_LOG_INFO(chat_ctx, "Semantic completion detection enabled (threshold: %.3f)", threshold_val);
-              }
-            }
-            else if (type_str == "repetition_detection")
-            {
-              if (chat_ctx)
-              {
-                WASI_NN_LOG_INFO(chat_ctx, "Semantic repetition detection enabled (threshold: %.3f)", threshold_val);
-              }
-            }
-            else if (type_str == "coherence_break")
-            {
-              if (chat_ctx)
-              {
-                WASI_NN_LOG_INFO(chat_ctx, "Semantic coherence break detection enabled (threshold: %.3f)", threshold_val);
-              }
-            }
+            params.antiprompt.push_back(stop_word);
           }
         }
       }
     }
   }
 
-  // Memory management
-  cJSON *memory = cJSON_GetObjectItem(root, "memory");
-  if (cJSON_IsObject(memory))
+  // Parse logit bias (server.cpp style)
+  cJSON *logit_bias = cJSON_GetObjectItem(root, "logit_bias");
+  if (cJSON_IsArray(logit_bias))
   {
-    cJSON *context_shifting = cJSON_GetObjectItem(memory, "context_shifting");
-    if (cJSON_IsBool(context_shifting))
+    params.sampling.logit_bias.clear();
+    int array_size = cJSON_GetArraySize(logit_bias);
+    for (int i = 0; i < array_size; i++)
     {
-      // This will be handled at the context level
+      cJSON *bias_item = cJSON_GetArrayItem(logit_bias, i);
+      if (cJSON_IsArray(bias_item) && cJSON_GetArraySize(bias_item) == 2)
+      {
+        cJSON *token_item = cJSON_GetArrayItem(bias_item, 0);
+        cJSON *bias_value = cJSON_GetArrayItem(bias_item, 1);
+        
+        if (cJSON_IsNumber(token_item) && cJSON_IsNumber(bias_value))
+        {
+          llama_token token = (llama_token)cJSON_GetNumberValue(token_item);
+          float bias = (float)cJSON_GetNumberValue(bias_value);
+          params.sampling.logit_bias.push_back({token, bias});
+        }
+      }
     }
+  }
 
-    // Use path_prompt_cache instead of cache_prompt if available
-    cJSON *cache_prompt = cJSON_GetObjectItem(memory, "cache_prompt");
-    if (cJSON_IsBool(cache_prompt))
-    {
-      // Note: This field might not exist in this version of the library
-      // params.cache_prompt = cJSON_IsTrue(cache_prompt);
+  // Critical parameter validation (based on server.cpp params_from_json_cmpl)
+  if (params.sampling.penalty_last_n < -1)
+  {
+    if (chat_ctx) {
+      WASI_NN_LOG_ERROR(chat_ctx, "Error: repeat_last_n must be >= -1");
     }
+    cJSON_Delete(root);
+    return;
+  }
+
+  if (params.sampling.dry_penalty_last_n < -1)
+  {
+    if (chat_ctx) {
+      WASI_NN_LOG_ERROR(chat_ctx, "Error: dry_penalty_last_n must be >= -1");
+    }
+    cJSON_Delete(root);
+    return;
+  }
+
+  // Auto-adjust -1 values to context size (simplified, no ctx available here)
+  if (params.sampling.penalty_last_n == -1)
+  {
+    params.sampling.penalty_last_n = params.n_ctx;
+  }
+
+  if (params.sampling.dry_penalty_last_n == -1)
+  {
+    params.sampling.dry_penalty_last_n = params.n_ctx;
+  }
+
+  // Validate DRY base parameter
+  if (params.sampling.dry_base < 1.0f)
+  {
+    if (chat_ctx) {
+      WASI_NN_LOG_WARN(chat_ctx, "dry_base (%.3f) < 1.0, resetting to default (%.3f)", 
+                       params.sampling.dry_base, 1.75f);
+    }
+    params.sampling.dry_base = 1.75f;
   }
 
   cJSON_Delete(root);
+  
+  if (chat_ctx) {
+    WASI_NN_LOG_INFO(chat_ctx, "Configuration parsed successfully");
+  }
 }
 
-// Phase 4.3: Parse advanced memory management configuration
+// Phase 4.3: Parse advanced memory management configuration (optimized)
 static void parse_memory_config(const char *config_json, LlamaChatContext *chat_ctx)
 {
   if (!config_json || !chat_ctx)
@@ -1430,113 +1270,112 @@ static void parse_memory_config(const char *config_json, LlamaChatContext *chat_
   cJSON *root = cJSON_Parse(config_json);
   if (!root)
   {
-    NN_WARN_PRINTF("Failed to parse config JSON for memory settings");
+    WASI_NN_LOG_WARN(chat_ctx, "Failed to parse config JSON for memory settings");
     return;
   }
 
   cJSON *memory = cJSON_GetObjectItem(root, "memory");
   if (cJSON_IsObject(memory))
   {
-    cJSON *item = nullptr;
-
     // Context shifting settings
-    if ((item = cJSON_GetObjectItem(memory, "context_shifting")))
+    chat_ctx->context_shifting_enabled = cjson_get_value(memory, "context_shifting", chat_ctx->context_shifting_enabled);
+    
+    // Cache strategy with validation
+    std::string cache_strategy = cjson_get_value(memory, "cache_strategy", chat_ctx->cache_strategy);
+    if (cache_strategy == "lru" || cache_strategy == "fifo" || cache_strategy == "smart")
     {
-      if (cJSON_IsBool(item))
-      {
-        chat_ctx->context_shifting_enabled = cJSON_IsTrue(item);
-        NN_INFO_PRINTF("Context shifting %s", 
-                       chat_ctx->context_shifting_enabled ? "enabled" : "disabled");
-      }
+      chat_ctx->cache_strategy = cache_strategy;
+      WASI_NN_LOG_INFO(chat_ctx, "Cache strategy set to: %s", cache_strategy.c_str());
+    }
+    else if (!cache_strategy.empty() && cache_strategy != chat_ctx->cache_strategy)
+    {
+      WASI_NN_LOG_WARN(chat_ctx, "Invalid cache strategy '%s', using default '%s'", 
+                       cache_strategy.c_str(), chat_ctx->cache_strategy.c_str());
     }
 
-    // Cache strategy
-    if ((item = cJSON_GetObjectItem(memory, "cache_strategy")))
+    // Maximum cache tokens with validation
+    uint32_t max_cache_tokens = cjson_get_value(memory, "max_cache_tokens", chat_ctx->max_cache_tokens);
+    if (max_cache_tokens > 0)
     {
-      if (cJSON_IsString(item))
-      {
-        chat_ctx->cache_strategy = cJSON_GetStringValue(item);
-        NN_INFO_PRINTF("Cache strategy set to: %s", chat_ctx->cache_strategy.c_str());
-      }
+      chat_ctx->max_cache_tokens = max_cache_tokens;
+      WASI_NN_LOG_INFO(chat_ctx, "Max cache tokens set to: %u", max_cache_tokens);
+    }
+    else if (max_cache_tokens == 0)
+    {
+      WASI_NN_LOG_WARN(chat_ctx, "max_cache_tokens cannot be 0, using default: %u", chat_ctx->max_cache_tokens);
     }
 
-    // Maximum cache tokens
-    if ((item = cJSON_GetObjectItem(memory, "max_cache_tokens")))
+    // Keep tokens with validation
+    uint32_t n_keep_tokens = cjson_get_value(memory, "n_keep_tokens", chat_ctx->n_keep_tokens);
+    if (n_keep_tokens <= 4096)  // Reasonable upper limit
     {
-      if (cJSON_IsNumber(item))
-      {
-        chat_ctx->max_cache_tokens = (uint32_t)cJSON_GetNumberValue(item);
-        NN_INFO_PRINTF("Max cache tokens set to: %u", chat_ctx->max_cache_tokens);
-      }
+      chat_ctx->n_keep_tokens = n_keep_tokens;
+      WASI_NN_LOG_INFO(chat_ctx, "Keep tokens set to: %u", n_keep_tokens);
+    }
+    else
+    {
+      WASI_NN_LOG_WARN(chat_ctx, "n_keep_tokens (%u) too large, using default: %u", 
+                       n_keep_tokens, chat_ctx->n_keep_tokens);
     }
 
-    // Phase 4.3: Advanced memory management settings
-    if ((item = cJSON_GetObjectItem(memory, "n_keep_tokens")))
+    // Discard tokens
+    chat_ctx->n_discard_tokens = cjson_get_value(memory, "n_discard_tokens", chat_ctx->n_discard_tokens);
+
+    // Memory pressure threshold with validation
+    float memory_pressure_threshold = cjson_get_value(memory, "memory_pressure_threshold", chat_ctx->memory_pressure_threshold);
+    if (memory_pressure_threshold >= 0.1f && memory_pressure_threshold <= 1.0f)
     {
-      if (cJSON_IsNumber(item))
-      {
-        chat_ctx->n_keep_tokens = (uint32_t)cJSON_GetNumberValue(item);
-        NN_INFO_PRINTF("Keep tokens set to: %u", chat_ctx->n_keep_tokens);
-      }
+      chat_ctx->memory_pressure_threshold = memory_pressure_threshold;
+      WASI_NN_LOG_INFO(chat_ctx, "Memory pressure threshold set to: %.2f", memory_pressure_threshold);
+    }
+    else
+    {
+      WASI_NN_LOG_WARN(chat_ctx, "Invalid memory_pressure_threshold (%.2f), must be between 0.1 and 1.0, using default: %.2f", 
+                       memory_pressure_threshold, chat_ctx->memory_pressure_threshold);
     }
 
-    if ((item = cJSON_GetObjectItem(memory, "n_discard_tokens")))
+    // Boolean settings
+    chat_ctx->enable_partial_cache_deletion = cjson_get_value(memory, "enable_partial_cache_deletion", chat_ctx->enable_partial_cache_deletion);
+    chat_ctx->enable_token_cache_reuse = cjson_get_value(memory, "enable_token_cache_reuse", chat_ctx->enable_token_cache_reuse);
+
+    // Cache deletion strategy with validation
+    std::string cache_deletion_strategy = cjson_get_value(memory, "cache_deletion_strategy", chat_ctx->cache_deletion_strategy);
+    if (cache_deletion_strategy == "lru" || cache_deletion_strategy == "fifo" || cache_deletion_strategy == "smart")
     {
-      if (cJSON_IsNumber(item))
-      {
-        chat_ctx->n_discard_tokens = (uint32_t)cJSON_GetNumberValue(item);
-        NN_INFO_PRINTF("Discard tokens set to: %u", chat_ctx->n_discard_tokens);
-      }
+      chat_ctx->cache_deletion_strategy = cache_deletion_strategy;
+      WASI_NN_LOG_INFO(chat_ctx, "Cache deletion strategy set to: %s", cache_deletion_strategy.c_str());
+    }
+    else if (!cache_deletion_strategy.empty() && cache_deletion_strategy != chat_ctx->cache_deletion_strategy)
+    {
+      WASI_NN_LOG_WARN(chat_ctx, "Invalid cache deletion strategy '%s', using default '%s'", 
+                       cache_deletion_strategy.c_str(), chat_ctx->cache_deletion_strategy.c_str());
     }
 
-    if ((item = cJSON_GetObjectItem(memory, "memory_pressure_threshold")))
+    // Memory limit with validation
+    uint32_t max_memory_mb = cjson_get_value(memory, "max_memory_mb", chat_ctx->max_memory_mb);
+    if (max_memory_mb == 0 || max_memory_mb >= 64)  // 0 = unlimited, or at least 64MB
     {
-      if (cJSON_IsNumber(item))
+      chat_ctx->max_memory_mb = max_memory_mb;
+      if (max_memory_mb == 0)
       {
-        chat_ctx->memory_pressure_threshold = (float)cJSON_GetNumberValue(item);
-        NN_INFO_PRINTF("Memory pressure threshold set to: %.2f", 
-                       chat_ctx->memory_pressure_threshold);
+        WASI_NN_LOG_INFO(chat_ctx, "Memory limit disabled (unlimited)");
       }
+      else
+      {
+        WASI_NN_LOG_INFO(chat_ctx, "Max memory limit set to: %u MB", max_memory_mb);
+      }
+    }
+    else
+    {
+      WASI_NN_LOG_WARN(chat_ctx, "max_memory_mb (%u) too small, minimum is 64MB, using default: %u", 
+                       max_memory_mb, chat_ctx->max_memory_mb);
     }
 
-    if ((item = cJSON_GetObjectItem(memory, "enable_partial_cache_deletion")))
-    {
-      if (cJSON_IsBool(item))
-      {
-        chat_ctx->enable_partial_cache_deletion = cJSON_IsTrue(item);
-        NN_INFO_PRINTF("Partial cache deletion %s", 
-                       chat_ctx->enable_partial_cache_deletion ? "enabled" : "disabled");
-      }
-    }
-
-    if ((item = cJSON_GetObjectItem(memory, "enable_token_cache_reuse")))
-    {
-      if (cJSON_IsBool(item))
-      {
-        chat_ctx->enable_token_cache_reuse = cJSON_IsTrue(item);
-        NN_INFO_PRINTF("Token cache reuse %s", 
-                       chat_ctx->enable_token_cache_reuse ? "enabled" : "disabled");
-      }
-    }
-
-    if ((item = cJSON_GetObjectItem(memory, "cache_deletion_strategy")))
-    {
-      if (cJSON_IsString(item))
-      {
-        chat_ctx->cache_deletion_strategy = cJSON_GetStringValue(item);
-        NN_INFO_PRINTF("Cache deletion strategy set to: %s", 
-                       chat_ctx->cache_deletion_strategy.c_str());
-      }
-    }
-
-    if ((item = cJSON_GetObjectItem(memory, "max_memory_mb")))
-    {
-      if (cJSON_IsNumber(item))
-      {
-        chat_ctx->max_memory_mb = (uint32_t)cJSON_GetNumberValue(item);
-        NN_INFO_PRINTF("Max memory limit set to: %u MB", chat_ctx->max_memory_mb);
-      }
-    }
+    WASI_NN_LOG_INFO(chat_ctx, "Memory configuration parsed successfully");
+  }
+  else if (cJSON_GetObjectItem(root, "memory"))
+  {
+    WASI_NN_LOG_WARN(chat_ctx, "Memory configuration is not a valid object");
   }
 
   cJSON_Delete(root);
@@ -1553,9 +1392,6 @@ static wasi_nn_error setup_threadpools(LlamaChatContext *chat_ctx)
   auto ggml_threadpool_new_fn =
       (decltype(ggml_threadpool_new) *)ggml_backend_reg_get_proc_address(
           reg, "ggml_threadpool_new");
-  auto ggml_threadpool_free_fn =
-      (decltype(ggml_threadpool_free) *)ggml_backend_reg_get_proc_address(
-          reg, "ggml_threadpool_free");
 
   struct ggml_threadpool_params tpp_batch =
       ggml_threadpool_params_from_cpu_params(params.cpuparams_batch);
@@ -1642,73 +1478,104 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
     cJSON *json = cJSON_ParseWithLength(config, config_len);
     if (json)
     {
-      // Helper function to parse backend configuration from either root or backend object
+      // Helper function to parse backend configuration (optimized)
       auto parse_backend_config = [&](cJSON *config_obj) {
-        cJSON *max_sessions = cJSON_GetObjectItem(config_obj, "max_sessions");
-        if (cJSON_IsNumber(max_sessions))
+        // Session management settings with validation
+        uint32_t max_sessions = cjson_get_value(config_obj, "max_sessions", chat_ctx->max_sessions);
+        if (max_sessions > 0 && max_sessions <= 10000)  // Reasonable range
         {
-          chat_ctx->max_sessions = (uint32_t)max_sessions->valueint;
+          chat_ctx->max_sessions = max_sessions;
+          WASI_NN_LOG_INFO(chat_ctx, "Max sessions set to: %u", max_sessions);
+        }
+        else if (max_sessions != chat_ctx->max_sessions)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid max_sessions (%u), using default: %u", 
+                           max_sessions, chat_ctx->max_sessions);
         }
 
-        cJSON *idle_timeout = cJSON_GetObjectItem(config_obj, "idle_timeout_ms");
-        if (cJSON_IsNumber(idle_timeout))
+        // Timeout settings with validation
+        uint32_t idle_timeout = cjson_get_value(config_obj, "idle_timeout_ms", chat_ctx->idle_timeout_ms);
+        if (idle_timeout >= 1000 && idle_timeout <= 86400000)  // 1s to 24h
         {
-          chat_ctx->idle_timeout_ms = (uint32_t)idle_timeout->valueint;
+          chat_ctx->idle_timeout_ms = idle_timeout;
+          WASI_NN_LOG_INFO(chat_ctx, "Idle timeout set to: %u ms", idle_timeout);
+        }
+        else if (idle_timeout != chat_ctx->idle_timeout_ms)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid idle_timeout_ms (%u), must be between 1000-86400000, using default: %u", 
+                           idle_timeout, chat_ctx->idle_timeout_ms);
         }
 
-        cJSON *auto_cleanup = cJSON_GetObjectItem(config_obj, "auto_cleanup");
-        if (cJSON_IsBool(auto_cleanup))
+        // Boolean settings
+        chat_ctx->auto_cleanup_enabled = cjson_get_value(config_obj, "auto_cleanup", chat_ctx->auto_cleanup_enabled);
+
+        // Concurrency settings with validation
+        uint32_t max_concurrent = cjson_get_value(config_obj, "max_concurrent", chat_ctx->max_concurrent);
+        if (max_concurrent > 0 && max_concurrent <= 256)  // Reasonable range
         {
-          chat_ctx->auto_cleanup_enabled = cJSON_IsTrue(auto_cleanup);
+          chat_ctx->max_concurrent = max_concurrent;
+          WASI_NN_LOG_INFO(chat_ctx, "Max concurrent set to: %u", max_concurrent);
+        }
+        else if (max_concurrent != chat_ctx->max_concurrent)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid max_concurrent (%u), must be between 1-256, using default: %u", 
+                           max_concurrent, chat_ctx->max_concurrent);
         }
 
-        cJSON *max_concurrent = cJSON_GetObjectItem(config_obj, "max_concurrent");
-        if (cJSON_IsNumber(max_concurrent))
+        // Queue size with validation
+        uint32_t queue_size = cjson_get_value(config_obj, "queue_size", chat_ctx->queue_size);
+        if (queue_size > 0 && queue_size <= 10000)  // Reasonable range
         {
-          chat_ctx->max_concurrent = (uint32_t)max_concurrent->valueint;
+          chat_ctx->queue_size = queue_size;
+          WASI_NN_LOG_INFO(chat_ctx, "Queue size set to: %u", queue_size);
+          
+          // Auto-adjust thresholds based on queue size
+          chat_ctx->queue_warning_threshold = std::min(chat_ctx->queue_warning_threshold, 
+                                                       static_cast<uint32_t>(queue_size * 0.8f));
+          chat_ctx->queue_reject_threshold = queue_size;
         }
-
-        cJSON *queue_size = cJSON_GetObjectItem(config_obj, "queue_size");
-        if (cJSON_IsNumber(queue_size))
+        else if (queue_size != chat_ctx->queue_size)
         {
-          chat_ctx->queue_size = (uint32_t)queue_size->valueint;
-        }
-        
-        // Enhanced task queue settings (Phase 4.2)
-        cJSON *default_task_timeout = cJSON_GetObjectItem(config_obj, "default_task_timeout_ms");
-        if (cJSON_IsNumber(default_task_timeout))
-        {
-          chat_ctx->default_task_timeout_ms = (uint32_t)default_task_timeout->valueint;
-        }
-        
-        cJSON *priority_scheduling = cJSON_GetObjectItem(config_obj, "priority_scheduling_enabled");
-        if (cJSON_IsBool(priority_scheduling))
-        {
-          chat_ctx->priority_scheduling_enabled = cJSON_IsTrue(priority_scheduling);
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid queue_size (%u), must be between 1-10000, using default: %u", 
+                           queue_size, chat_ctx->queue_size);
         }
         
-        cJSON *fair_scheduling = cJSON_GetObjectItem(config_obj, "fair_scheduling_enabled");
-        if (cJSON_IsBool(fair_scheduling))
+        // Task timeout with validation
+        uint32_t task_timeout = cjson_get_value(config_obj, "default_task_timeout_ms", chat_ctx->default_task_timeout_ms);
+        if (task_timeout >= 1000 && task_timeout <= 600000)  // 1s to 10min
         {
-          chat_ctx->fair_scheduling_enabled = cJSON_IsTrue(fair_scheduling);
+          chat_ctx->default_task_timeout_ms = task_timeout;
+          WASI_NN_LOG_INFO(chat_ctx, "Default task timeout set to: %u ms", task_timeout);
+        }
+        else if (task_timeout != chat_ctx->default_task_timeout_ms)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid default_task_timeout_ms (%u), must be between 1000-600000, using default: %u", 
+                           task_timeout, chat_ctx->default_task_timeout_ms);
         }
         
-        cJSON *queue_warning_threshold = cJSON_GetObjectItem(config_obj, "queue_warning_threshold");
-        if (cJSON_IsNumber(queue_warning_threshold))
-        {
-          chat_ctx->queue_warning_threshold = (uint32_t)queue_warning_threshold->valueint;
-        }
+        // Boolean scheduling settings
+        chat_ctx->priority_scheduling_enabled = cjson_get_value(config_obj, "priority_scheduling_enabled", 
+                                                               chat_ctx->priority_scheduling_enabled);
+        chat_ctx->fair_scheduling_enabled = cjson_get_value(config_obj, "fair_scheduling_enabled", 
+                                                           chat_ctx->fair_scheduling_enabled);
+        chat_ctx->auto_queue_cleanup = cjson_get_value(config_obj, "auto_queue_cleanup", 
+                                                      chat_ctx->auto_queue_cleanup);
         
-        cJSON *queue_reject_threshold = cJSON_GetObjectItem(config_obj, "queue_reject_threshold");
-        if (cJSON_IsNumber(queue_reject_threshold))
-        {
-          chat_ctx->queue_reject_threshold = (uint32_t)queue_reject_threshold->valueint;
-        }
+        // Queue threshold settings with validation
+        uint32_t queue_warning = cjson_get_value(config_obj, "queue_warning_threshold", chat_ctx->queue_warning_threshold);
+        uint32_t queue_reject = cjson_get_value(config_obj, "queue_reject_threshold", chat_ctx->queue_reject_threshold);
         
-        cJSON *auto_queue_cleanup = cJSON_GetObjectItem(config_obj, "auto_queue_cleanup");
-        if (cJSON_IsBool(auto_queue_cleanup))
+        if (queue_warning <= chat_ctx->queue_size && queue_reject <= chat_ctx->queue_size && 
+            queue_warning <= queue_reject)
         {
-          chat_ctx->auto_queue_cleanup = cJSON_IsTrue(auto_queue_cleanup);
+          chat_ctx->queue_warning_threshold = queue_warning;
+          chat_ctx->queue_reject_threshold = queue_reject;
+          WASI_NN_LOG_INFO(chat_ctx, "Queue thresholds: warning=%u, reject=%u", queue_warning, queue_reject);
+        }
+        else
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid queue thresholds (warning=%u, reject=%u), using defaults: warning=%u, reject=%u", 
+                           queue_warning, queue_reject, chat_ctx->queue_warning_threshold, chat_ctx->queue_reject_threshold);
         }
       };
 
@@ -1718,86 +1585,150 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
       {
         // New nested backend configuration
         parse_backend_config(backend_config);
+        WASI_NN_LOG_INFO(chat_ctx, "Loaded nested backend configuration");
       }
       else
       {
         // Legacy flat configuration (backward compatibility)
         parse_backend_config(json);
+        WASI_NN_LOG_INFO(chat_ctx, "Loaded flat backend configuration (legacy mode)");
       }
 
-      // Memory policy
+      // Memory policy with enhanced parsing
       cJSON *memory_policy = cJSON_GetObjectItem(json, "memory_policy");
       if (cJSON_IsObject(memory_policy))
       {
-        cJSON *context_shifting = cJSON_GetObjectItem(memory_policy, "context_shifting");
-        if (cJSON_IsBool(context_shifting))
+        chat_ctx->context_shifting_enabled = cjson_get_value(memory_policy, "context_shifting", 
+                                                            chat_ctx->context_shifting_enabled);
+        
+        std::string cache_strategy = cjson_get_value(memory_policy, "cache_strategy", chat_ctx->cache_strategy);
+        if (cache_strategy == "lru" || cache_strategy == "fifo" || cache_strategy == "smart")
         {
-          chat_ctx->context_shifting_enabled = cJSON_IsTrue(context_shifting);
+          chat_ctx->cache_strategy = cache_strategy;
+          WASI_NN_LOG_INFO(chat_ctx, "Memory cache strategy set to: %s", cache_strategy.c_str());
+        }
+        else if (!cache_strategy.empty() && cache_strategy != chat_ctx->cache_strategy)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid memory cache strategy '%s', using default '%s'", 
+                           cache_strategy.c_str(), chat_ctx->cache_strategy.c_str());
         }
 
-        cJSON *cache_strategy = cJSON_GetObjectItem(memory_policy, "cache_strategy");
-        if (cJSON_IsString(cache_strategy))
+        uint32_t max_cache_tokens = cjson_get_value(memory_policy, "max_cache_tokens", chat_ctx->max_cache_tokens);
+        if (max_cache_tokens >= 1024 && max_cache_tokens <= 1000000)  // 1K to 1M tokens
         {
-          chat_ctx->cache_strategy = std::string(cJSON_GetStringValue(cache_strategy));
+          chat_ctx->max_cache_tokens = max_cache_tokens;
+          WASI_NN_LOG_INFO(chat_ctx, "Max cache tokens set to: %u", max_cache_tokens);
+        }
+        else if (max_cache_tokens != chat_ctx->max_cache_tokens)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid max_cache_tokens (%u), must be between 1024-1000000, using default: %u", 
+                           max_cache_tokens, chat_ctx->max_cache_tokens);
         }
 
-        cJSON *max_cache_tokens = cJSON_GetObjectItem(memory_policy, "max_cache_tokens");
-        if (cJSON_IsNumber(max_cache_tokens))
+        uint32_t max_memory_mb = cjson_get_value(memory_policy, "max_memory_mb", chat_ctx->max_memory_mb);
+        if (max_memory_mb == 0 || (max_memory_mb >= 128 && max_memory_mb <= 32768))  // 0=unlimited, 128MB to 32GB
         {
-          chat_ctx->max_cache_tokens = (uint32_t)max_cache_tokens->valueint;
+          chat_ctx->max_memory_mb = max_memory_mb;
+          WASI_NN_LOG_INFO(chat_ctx, "Max memory limit set to: %u MB (0=unlimited)", max_memory_mb);
+        }
+        else if (max_memory_mb != chat_ctx->max_memory_mb)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid max_memory_mb (%u), must be 0 or between 128-32768, using default: %u", 
+                           max_memory_mb, chat_ctx->max_memory_mb);
+        }
+
+        // Memory pressure threshold
+        float memory_pressure = cjson_get_value(memory_policy, "memory_pressure_threshold", chat_ctx->memory_pressure_threshold);
+        if (memory_pressure >= 0.5f && memory_pressure <= 0.95f)
+        {
+          chat_ctx->memory_pressure_threshold = memory_pressure;
+          WASI_NN_LOG_INFO(chat_ctx, "Memory pressure threshold set to: %.2f", memory_pressure);
+        }
+        else if (memory_pressure != chat_ctx->memory_pressure_threshold)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid memory_pressure_threshold (%.2f), must be between 0.5-0.95, using default: %.2f", 
+                           memory_pressure, chat_ctx->memory_pressure_threshold);
+        }
+
+        // Token keep/discard settings
+        uint32_t n_keep_tokens = cjson_get_value(memory_policy, "n_keep_tokens", chat_ctx->n_keep_tokens);
+        if (n_keep_tokens >= 64 && n_keep_tokens <= 2048)
+        {
+          chat_ctx->n_keep_tokens = n_keep_tokens;
+          WASI_NN_LOG_INFO(chat_ctx, "Keep tokens set to: %u", n_keep_tokens);
+        }
+        else if (n_keep_tokens != chat_ctx->n_keep_tokens)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid n_keep_tokens (%u), must be between 64-2048, using default: %u", 
+                           n_keep_tokens, chat_ctx->n_keep_tokens);
+        }
+
+        // Boolean memory settings
+        chat_ctx->enable_partial_cache_deletion = cjson_get_value(memory_policy, "enable_partial_cache_deletion", 
+                                                                 chat_ctx->enable_partial_cache_deletion);
+        chat_ctx->enable_token_cache_reuse = cjson_get_value(memory_policy, "enable_token_cache_reuse", 
+                                                            chat_ctx->enable_token_cache_reuse);
+
+        // Cache deletion strategy
+        std::string cache_delete_strategy = cjson_get_value(memory_policy, "cache_deletion_strategy", chat_ctx->cache_deletion_strategy);
+        if (cache_delete_strategy == "lru" || cache_delete_strategy == "fifo" || cache_delete_strategy == "smart")
+        {
+          chat_ctx->cache_deletion_strategy = cache_delete_strategy;
+          WASI_NN_LOG_INFO(chat_ctx, "Cache deletion strategy set to: %s", cache_delete_strategy.c_str());
+        }
+        else if (!cache_delete_strategy.empty() && cache_delete_strategy != chat_ctx->cache_deletion_strategy)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid cache_deletion_strategy '%s', using default '%s'", 
+                           cache_delete_strategy.c_str(), chat_ctx->cache_deletion_strategy.c_str());
         }
       }
 
-      // Logging configuration
+      // Logging configuration with enhanced validation
       cJSON *logging = cJSON_GetObjectItem(json, "logging");
       if (cJSON_IsObject(logging))
       {
-        cJSON *log_level = cJSON_GetObjectItem(logging, "level");
-        if (cJSON_IsString(log_level))
+        std::string log_level = cjson_get_value(logging, "level", chat_ctx->log_level);
+        if (log_level == "debug" || log_level == "info" || log_level == "warn" || 
+            log_level == "error" || log_level == "fatal")
         {
-          chat_ctx->log_level = std::string(cJSON_GetStringValue(log_level));
+          chat_ctx->log_level = log_level;
+          WASI_NN_LOG_INFO(chat_ctx, "Log level set to: %s", log_level.c_str());
+        }
+        else if (!log_level.empty() && log_level != chat_ctx->log_level)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid log level '%s', using default '%s'", 
+                           log_level.c_str(), chat_ctx->log_level.c_str());
         }
 
-        cJSON *enable_debug = cJSON_GetObjectItem(logging, "enable_debug");
-        if (cJSON_IsBool(enable_debug))
-        {
-          chat_ctx->enable_debug_log = cJSON_IsTrue(enable_debug);
-        }
+        // Boolean logging settings
+        chat_ctx->enable_debug_log = cjson_get_value(logging, "enable_debug", chat_ctx->enable_debug_log);
+        chat_ctx->enable_timestamps = cjson_get_value(logging, "timestamps", chat_ctx->enable_timestamps);
+        chat_ctx->enable_colors = cjson_get_value(logging, "colors", chat_ctx->enable_colors);
 
-        cJSON *log_file = cJSON_GetObjectItem(logging, "file");
-        if (cJSON_IsString(log_file))
+        // Log file path validation
+        std::string log_file = cjson_get_value(logging, "file", chat_ctx->log_file);
+        if (!log_file.empty())
         {
-          chat_ctx->log_file = std::string(cJSON_GetStringValue(log_file));
+          chat_ctx->log_file = log_file;
+          WASI_NN_LOG_INFO(chat_ctx, "Log file set to: %s", log_file.c_str());
         }
-        
-        // New Phase 5.1 logging options
-        cJSON *enable_timestamps = cJSON_GetObjectItem(logging, "timestamps");
-        if (cJSON_IsBool(enable_timestamps))
-        {
-          chat_ctx->enable_timestamps = cJSON_IsTrue(enable_timestamps);
-        }
-        
-        cJSON *enable_colors = cJSON_GetObjectItem(logging, "colors");
-        if (cJSON_IsBool(enable_colors))
-        {
-          chat_ctx->enable_colors = cJSON_IsTrue(enable_colors);
-        }
-      }
-
-      // Performance settings
+      }      // Performance settings with validation
       cJSON *performance = cJSON_GetObjectItem(json, "performance");
       if (cJSON_IsObject(performance))
       {
-        cJSON *batch_processing = cJSON_GetObjectItem(performance, "batch_processing");
-        if (cJSON_IsBool(batch_processing))
-        {
-          chat_ctx->batch_processing_enabled = cJSON_IsTrue(batch_processing);
-        }
+        chat_ctx->batch_processing_enabled = cjson_get_value(performance, "batch_processing", 
+                                                            chat_ctx->batch_processing_enabled);
 
-        cJSON *batch_size = cJSON_GetObjectItem(performance, "batch_size");
-        if (cJSON_IsNumber(batch_size))
+        uint32_t batch_size = cjson_get_value(performance, "batch_size", chat_ctx->batch_size);
+        if (batch_size >= 1 && batch_size <= 2048)  // Reasonable batch size range
         {
-          chat_ctx->batch_size = (uint32_t)batch_size->valueint;
+          chat_ctx->batch_size = batch_size;
+          WASI_NN_LOG_INFO(chat_ctx, "Batch size set to: %u", batch_size);
+        }
+        else if (batch_size != chat_ctx->batch_size)
+        {
+          WASI_NN_LOG_WARN(chat_ctx, "Invalid batch_size (%u), must be between 1-2048, using default: %u", 
+                           batch_size, chat_ctx->batch_size);
         }
       }
 
