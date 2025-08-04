@@ -173,7 +173,8 @@ extern "C" {
  
  __attribute__((visibility("default"))) wasi_nn_error
  run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
-		   tensor *input_tensor,tensor_data output_tensor, uint32_t *output_tensor_size);
+		   tensor *input_tensor, tensor_data output_tensor, uint32_t *output_tensor_size,
+		   const char *runtime_config, uint32_t config_len);
 
  // Additional API functions
  __attribute__((visibility("default"))) wasi_nn_error

@@ -76,6 +76,58 @@ enum wasi_nn_task_priority
   WASI_NN_PRIORITY_URGENT = 3
 };
 
+// Runtime parameters structure for dynamic inference configuration
+struct wasi_nn_runtime_params
+{
+  // Sampling parameters (most commonly modified at runtime)
+  float temperature = -1.0f;           // -1 means use default/existing value
+  float top_p = -1.0f;
+  int32_t top_k = -1;
+  float min_p = -1.0f;
+  float typical_p = -1.0f;
+  
+  // Penalty parameters
+  float repeat_penalty = -1.0f;
+  float frequency_penalty = -1.0f;
+  float presence_penalty = -1.0f;
+  int32_t penalty_last_n = -1;
+  
+  // Generation control
+  int32_t max_tokens = -1;
+  int32_t seed = -1;
+  bool ignore_eos = false;  // Default to false, but can be overridden
+  bool ignore_eos_set = false;  // Flag to indicate if ignore_eos was explicitly set
+  
+  // DRY sampling parameters
+  float dry_multiplier = -1.0f;
+  float dry_base = -1.0f;
+  int32_t dry_allowed_length = -1;
+  int32_t dry_penalty_last_n = -1;
+  
+  // Dynamic temperature parameters
+  float dynatemp_range = -1.0f;
+  float dynatemp_exponent = -1.0f;
+  
+  // Mirostat parameters
+  int32_t mirostat = -1;
+  float mirostat_tau = -1.0f;
+  float mirostat_eta = -1.0f;
+  
+  // Other generation parameters
+  int32_t n_probs = -1;
+  int32_t min_keep = -1;
+  
+  // Stop sequences (optional)
+  std::vector<std::string> stop_sequences;
+  bool stop_sequences_set = false;
+  
+  // Grammar (optional)
+  std::string grammar;
+  bool grammar_set = false;
+  
+  wasi_nn_runtime_params() = default;
+};
+
 // Enhanced task structure for WASI-NN backend
 struct wasi_nn_task
 {
@@ -991,6 +1043,360 @@ std::string cjson_get_value<std::string>(cJSON *root, const char *key, const std
     return std::string(cJSON_GetStringValue(item));
   }
   return default_value;
+}
+
+// Function to parse runtime parameters from JSON configuration
+static bool parse_runtime_params(const char *config_json, uint32_t config_len,
+                                wasi_nn_runtime_params &runtime_params,
+                                LlamaChatContext *chat_ctx = nullptr)
+{
+  if (!config_json || config_len == 0) {
+    if (chat_ctx) {
+      WASI_NN_LOG_INFO(chat_ctx, "No runtime config provided, using defaults");
+    }
+    return true; // Not an error, just use defaults
+  }
+
+  cJSON *root = cJSON_ParseWithLength(config_json, config_len);
+  if (!root) {
+    if (chat_ctx) {
+      WASI_NN_LOG_ERROR(chat_ctx, "Failed to parse runtime configuration JSON");
+    }
+    return false;
+  }
+
+  // Parse core sampling parameters
+  runtime_params.temperature = cjson_get_value(root, "temperature", runtime_params.temperature);
+  runtime_params.temperature = cjson_get_value(root, "temp", runtime_params.temperature); // Alternative name
+  runtime_params.top_p = cjson_get_value(root, "top_p", runtime_params.top_p);
+  runtime_params.top_k = cjson_get_value(root, "top_k", runtime_params.top_k);
+  runtime_params.min_p = cjson_get_value(root, "min_p", runtime_params.min_p);
+  runtime_params.typical_p = cjson_get_value(root, "typical_p", runtime_params.typical_p);
+
+  // Parse penalty parameters
+  runtime_params.repeat_penalty = cjson_get_value(root, "repeat_penalty", runtime_params.repeat_penalty);
+  runtime_params.frequency_penalty = cjson_get_value(root, "frequency_penalty", runtime_params.frequency_penalty);
+  runtime_params.presence_penalty = cjson_get_value(root, "presence_penalty", runtime_params.presence_penalty);
+  runtime_params.penalty_last_n = cjson_get_value(root, "penalty_last_n", runtime_params.penalty_last_n);
+  runtime_params.penalty_last_n = cjson_get_value(root, "repeat_last_n", runtime_params.penalty_last_n); // OpenAI compatibility
+
+  // Parse generation control parameters
+  runtime_params.max_tokens = cjson_get_value(root, "max_tokens", runtime_params.max_tokens);
+  runtime_params.max_tokens = cjson_get_value(root, "n_predict", runtime_params.max_tokens); // Alternative name
+  runtime_params.seed = cjson_get_value(root, "seed", runtime_params.seed);
+  
+  // Parse ignore_eos with explicit flag
+  cJSON *ignore_eos_item = cJSON_GetObjectItem(root, "ignore_eos");
+  if (cJSON_IsBool(ignore_eos_item)) {
+    runtime_params.ignore_eos = cJSON_IsTrue(ignore_eos_item);
+    runtime_params.ignore_eos_set = true;
+  }
+
+  // Parse DRY sampling parameters
+  runtime_params.dry_multiplier = cjson_get_value(root, "dry_multiplier", runtime_params.dry_multiplier);
+  runtime_params.dry_base = cjson_get_value(root, "dry_base", runtime_params.dry_base);
+  runtime_params.dry_allowed_length = cjson_get_value(root, "dry_allowed_length", runtime_params.dry_allowed_length);
+  runtime_params.dry_penalty_last_n = cjson_get_value(root, "dry_penalty_last_n", runtime_params.dry_penalty_last_n);
+
+  // Parse dynamic temperature parameters
+  runtime_params.dynatemp_range = cjson_get_value(root, "dynatemp_range", runtime_params.dynatemp_range);
+  runtime_params.dynatemp_exponent = cjson_get_value(root, "dynatemp_exponent", runtime_params.dynatemp_exponent);
+
+  // Parse Mirostat parameters
+  runtime_params.mirostat = cjson_get_value(root, "mirostat", runtime_params.mirostat);
+  runtime_params.mirostat_tau = cjson_get_value(root, "mirostat_tau", runtime_params.mirostat_tau);
+  runtime_params.mirostat_eta = cjson_get_value(root, "mirostat_eta", runtime_params.mirostat_eta);
+
+  // Parse other parameters
+  runtime_params.n_probs = cjson_get_value(root, "n_probs", runtime_params.n_probs);
+  runtime_params.n_probs = cjson_get_value(root, "logprobs", runtime_params.n_probs); // OpenAI compatibility
+  runtime_params.min_keep = cjson_get_value(root, "min_keep", runtime_params.min_keep);
+
+  // Parse stop sequences
+  cJSON *stop = cJSON_GetObjectItem(root, "stop");
+  if (cJSON_IsArray(stop)) {
+    runtime_params.stop_sequences.clear();
+    int array_size = cJSON_GetArraySize(stop);
+    for (int i = 0; i < array_size; i++) {
+      cJSON *stop_item = cJSON_GetArrayItem(stop, i);
+      if (cJSON_IsString(stop_item)) {
+        std::string stop_word = cJSON_GetStringValue(stop_item);
+        if (!stop_word.empty()) {
+          runtime_params.stop_sequences.push_back(stop_word);
+        }
+      }
+    }
+    runtime_params.stop_sequences_set = true;
+  }
+
+  // Parse grammar
+  cJSON *grammar_item = cJSON_GetObjectItem(root, "grammar");
+  if (cJSON_IsString(grammar_item)) {
+    runtime_params.grammar = cJSON_GetStringValue(grammar_item);
+    runtime_params.grammar_set = true;
+  }
+
+  // Parameter validation
+  if (runtime_params.temperature > 0.0f && (runtime_params.temperature < 0.01f || runtime_params.temperature > 10.0f)) {
+    if (chat_ctx) {
+      WASI_NN_LOG_WARN(chat_ctx, "Temperature %.3f out of reasonable range [0.01, 10.0], using as-is", runtime_params.temperature);
+    }
+  }
+
+  if (runtime_params.top_p > 0.0f && (runtime_params.top_p < 0.01f || runtime_params.top_p > 1.0f)) {
+    if (chat_ctx) {
+      WASI_NN_LOG_WARN(chat_ctx, "top_p %.3f out of valid range [0.01, 1.0], clamping", runtime_params.top_p);
+    }
+    runtime_params.top_p = std::max(0.01f, std::min(1.0f, runtime_params.top_p));
+  }
+
+  if (runtime_params.repeat_penalty > 0.0f && runtime_params.repeat_penalty < 0.1f) {
+    if (chat_ctx) {
+      WASI_NN_LOG_WARN(chat_ctx, "repeat_penalty %.3f too low, setting to 0.1", runtime_params.repeat_penalty);
+    }
+    runtime_params.repeat_penalty = 0.1f;
+  }
+
+  cJSON_Delete(root);
+  
+  if (chat_ctx) {
+    WASI_NN_LOG_INFO(chat_ctx, "Runtime parameters parsed successfully");
+  }
+  
+  return true;
+}
+
+// Function to apply runtime parameters to sampling context
+static void apply_runtime_params_to_sampling(common_sampler *&sampler, 
+                                            const wasi_nn_runtime_params &runtime_params,
+                                            const llama_model *model,
+                                            LlamaChatContext *chat_ctx = nullptr)
+{
+  if (!sampler || !model) {
+    if (chat_ctx) {
+      WASI_NN_LOG_ERROR(chat_ctx, "Invalid sampler context or model for runtime parameter application");
+    }
+    return;
+  }
+
+  // Get current sampling parameters from the chat context
+  common_params_sampling current_params = chat_ctx->server_ctx.params_base.sampling;
+  bool params_changed = false;
+
+  // Apply core sampling parameters
+  if (runtime_params.temperature >= 0.0f) {
+    current_params.temp = runtime_params.temperature;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied temperature: %.3f", runtime_params.temperature);
+    }
+  }
+
+  if (runtime_params.top_p >= 0.0f) {
+    current_params.top_p = runtime_params.top_p;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied top_p: %.3f", runtime_params.top_p);
+    }
+  }
+
+  if (runtime_params.top_k >= 0) {
+    current_params.top_k = runtime_params.top_k;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied top_k: %d", runtime_params.top_k);
+    }
+  }
+
+  if (runtime_params.min_p >= 0.0f) {
+    current_params.min_p = runtime_params.min_p;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied min_p: %.3f", runtime_params.min_p);
+    }
+  }
+
+  if (runtime_params.typical_p >= 0.0f) {
+    current_params.typ_p = runtime_params.typical_p;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied typical_p: %.3f", runtime_params.typical_p);
+    }
+  }
+
+  // Apply penalty parameters
+  if (runtime_params.repeat_penalty >= 0.0f) {
+    current_params.penalty_repeat = runtime_params.repeat_penalty;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied repeat_penalty: %.3f", runtime_params.repeat_penalty);
+    }
+  }
+
+  if (runtime_params.frequency_penalty >= 0.0f) {
+    current_params.penalty_freq = runtime_params.frequency_penalty;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied frequency_penalty: %.3f", runtime_params.frequency_penalty);
+    }
+  }
+
+  if (runtime_params.presence_penalty >= 0.0f) {
+    current_params.penalty_present = runtime_params.presence_penalty;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied presence_penalty: %.3f", runtime_params.presence_penalty);
+    }
+  }
+
+  if (runtime_params.penalty_last_n >= 0) {
+    current_params.penalty_last_n = runtime_params.penalty_last_n;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied penalty_last_n: %d", runtime_params.penalty_last_n);
+    }
+  }
+
+  // Apply DRY sampling parameters
+  if (runtime_params.dry_multiplier >= 0.0f) {
+    current_params.dry_multiplier = runtime_params.dry_multiplier;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied dry_multiplier: %.3f", runtime_params.dry_multiplier);
+    }
+  }
+
+  if (runtime_params.dry_base >= 0.0f) {
+    current_params.dry_base = runtime_params.dry_base;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied dry_base: %.3f", runtime_params.dry_base);
+    }
+  }
+
+  if (runtime_params.dry_allowed_length >= 0) {
+    current_params.dry_allowed_length = runtime_params.dry_allowed_length;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied dry_allowed_length: %d", runtime_params.dry_allowed_length);
+    }
+  }
+
+  if (runtime_params.dry_penalty_last_n >= 0) {
+    current_params.dry_penalty_last_n = runtime_params.dry_penalty_last_n;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied dry_penalty_last_n: %d", runtime_params.dry_penalty_last_n);
+    }
+  }
+
+  // Apply dynamic temperature parameters
+  if (runtime_params.dynatemp_range >= 0.0f) {
+    current_params.dynatemp_range = runtime_params.dynatemp_range;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied dynatemp_range: %.3f", runtime_params.dynatemp_range);
+    }
+  }
+
+  if (runtime_params.dynatemp_exponent >= 0.0f) {
+    current_params.dynatemp_exponent = runtime_params.dynatemp_exponent;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied dynatemp_exponent: %.3f", runtime_params.dynatemp_exponent);
+    }
+  }
+
+  // Apply Mirostat parameters
+  if (runtime_params.mirostat >= 0) {
+    current_params.mirostat = runtime_params.mirostat;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied mirostat: %d", runtime_params.mirostat);
+    }
+  }
+
+  if (runtime_params.mirostat_tau >= 0.0f) {
+    current_params.mirostat_tau = runtime_params.mirostat_tau;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied mirostat_tau: %.3f", runtime_params.mirostat_tau);
+    }
+  }
+
+  if (runtime_params.mirostat_eta >= 0.0f) {
+    current_params.mirostat_eta = runtime_params.mirostat_eta;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied mirostat_eta: %.3f", runtime_params.mirostat_eta);
+    }
+  }
+
+  // Apply other parameters
+  if (runtime_params.seed >= 0) {
+    current_params.seed = runtime_params.seed;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied seed: %d", runtime_params.seed);
+    }
+  }
+
+  if (runtime_params.n_probs >= 0) {
+    current_params.n_probs = runtime_params.n_probs;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied n_probs: %d", runtime_params.n_probs);
+    }
+  }
+
+  if (runtime_params.min_keep >= 0) {
+    current_params.min_keep = runtime_params.min_keep;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied min_keep: %d", runtime_params.min_keep);
+    }
+  }
+
+  if (runtime_params.ignore_eos_set) {
+    current_params.ignore_eos = runtime_params.ignore_eos;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied ignore_eos: %s", runtime_params.ignore_eos ? "true" : "false");
+    }
+  }
+
+  // Apply grammar if provided
+  if (runtime_params.grammar_set && !runtime_params.grammar.empty()) {
+    current_params.grammar = runtime_params.grammar;
+    params_changed = true;
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Applied grammar: %s", runtime_params.grammar.c_str());
+    }
+  }
+
+  // If any parameters changed, recreate the sampler
+  if (params_changed) {
+    // Free the old sampler
+    common_sampler_free(sampler);
+    
+    // Create new sampler with updated parameters
+    sampler = common_sampler_init(model, current_params);
+    
+    if (!sampler) {
+      if (chat_ctx) {
+        WASI_NN_LOG_ERROR(chat_ctx, "Failed to recreate sampler with runtime parameters");
+      }
+      return;
+    }
+    
+    if (chat_ctx) {
+      WASI_NN_LOG_INFO(chat_ctx, "Runtime parameters applied to sampler successfully - sampler recreated");
+    }
+  } else {
+    if (chat_ctx) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "No runtime parameters provided or changed, using existing sampler");
+    }
+  }
 }
 
 // Enhanced parameter parsing function (based on server.cpp params_from_json_cmpl)
@@ -2194,10 +2600,186 @@ static std::string run_inference_for_session(LlamaChatContext *chat_ctx,
   return response;
 }
 
+// Enhanced helper function to run inference with runtime parameter support
+static std::string run_inference_for_session_with_params(LlamaChatContext *chat_ctx,
+                                                        graph_execution_context exec_ctx,
+                                                        const std::string &user_input,
+                                                        const wasi_nn_runtime_params *runtime_params = nullptr)
+{
+  // Find session
+  auto session_it = chat_ctx->sessions.find(exec_ctx);
+  if (session_it == chat_ctx->sessions.end())
+  {
+    return "Error: Invalid session";
+  }
+
+  SessionInfo &session_info = session_it->second;
+  auto &chat_msgs = session_info.chat_history;
+
+  // Update last activity
+  session_info.last_activity = std::chrono::steady_clock::now();
+
+  // Determine max_tokens for this generation
+  int max_tokens = chat_ctx->server_ctx.params_base.n_predict;
+  if (runtime_params && runtime_params->max_tokens > 0) {
+    max_tokens = runtime_params->max_tokens;
+    WASI_NN_LOG_DEBUG(chat_ctx, "Using runtime max_tokens: %d", max_tokens);
+  }
+
+  // Store original sampling parameters for restoration
+  common_params original_params = chat_ctx->server_ctx.params_base;
+
+  // Chat formatting function (from main.cpp)
+  auto chat_add_and_format = [&](const std::string &role,
+                                 const std::string &content)
+  {
+    common_chat_msg new_msg;
+    new_msg.role = role;
+    new_msg.content = content;
+
+    // Check if chat templates are available
+    if (!chat_ctx->server_ctx.chat_templates.get()) {
+      NN_ERR_PRINTF("Chat templates not initialized");
+      return std::string("Error: Chat templates not available");
+    }
+
+    auto formatted = common_chat_format_single(
+        chat_ctx->server_ctx.chat_templates.get(), chat_msgs, new_msg, role == "user",
+        false // use_jinja
+    );
+
+    chat_msgs.push_back(new_msg);
+    NN_DBG_PRINTF("Formatted message: '%s'", formatted.c_str());
+    return formatted;
+  };
+
+  // Add user message and get formatted prompt
+  std::string prompt = chat_add_and_format("user", user_input);
+
+  WASI_NN_LOG_DEBUG(chat_ctx, "Processing prompt for session %d: %s", exec_ctx, prompt.c_str());
+
+  // Clear KV cache for session isolation (as per user's requirement)
+  llama_memory_clear(llama_get_memory(chat_ctx->server_ctx.ctx), true);
+
+  // Tokenize the complete conversation history
+  common_chat_templates_inputs inputs;
+  inputs.messages = chat_msgs;
+  inputs.add_generation_prompt = true;
+
+  // Check if chat templates are available before using them
+  if (!chat_ctx->server_ctx.chat_templates.get()) {
+    NN_ERR_PRINTF("Chat templates not initialized for prompt generation");
+    return "Error: Chat templates not available";
+  }
+
+  std::string full_prompt =
+      common_chat_templates_apply(chat_ctx->server_ctx.chat_templates.get(), inputs)
+          .prompt;
+
+  // Tokenize
+  std::vector<llama_token> tokens =
+      common_tokenize(chat_ctx->server_ctx.ctx, full_prompt, true, true);
+
+  // Apply runtime parameters to sampler if provided
+  if (runtime_params && !chat_ctx->server_ctx.slots.empty() && chat_ctx->server_ctx.slots[0].smpl) {
+    apply_runtime_params_to_sampling(chat_ctx->server_ctx.slots[0].smpl, *runtime_params, 
+                                    chat_ctx->server_ctx.model, chat_ctx);
+  }
+
+  // Apply stop sequences if provided
+  std::vector<std::string> original_antiprompt;
+  if (runtime_params && runtime_params->stop_sequences_set) {
+    // Temporarily replace antiprompt with runtime stop sequences
+    original_antiprompt = chat_ctx->server_ctx.params_base.antiprompt;
+    chat_ctx->server_ctx.params_base.antiprompt = runtime_params->stop_sequences;
+    WASI_NN_LOG_DEBUG(chat_ctx, "Applied %zu runtime stop sequences", runtime_params->stop_sequences.size());
+  }
+
+  // Generate response (simplified version of main.cpp's loop)
+  std::string response;
+
+  // Process input tokens
+  llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
+
+  if (llama_decode(chat_ctx->server_ctx.ctx, batch))
+  {
+    NN_ERR_PRINTF("Failed to decode input tokens");
+    return "Error: Failed to process input";
+  }
+
+  // Generate tokens one by one with runtime parameter support
+  for (int i = 0; i < max_tokens; ++i)
+  {
+    // Verify that slots[0] and its sampler are valid
+    if (chat_ctx->server_ctx.slots.empty() || chat_ctx->server_ctx.slots[0].smpl == nullptr) {
+      NN_ERR_PRINTF("Invalid slot or sampler state");
+      return "Error: Invalid sampler state";
+    }
+
+    llama_token new_token =
+        common_sampler_sample(chat_ctx->server_ctx.slots[0].smpl, chat_ctx->server_ctx.ctx, -1);
+
+    // Check for EOS token (with runtime ignore_eos support)
+    bool should_stop_eos = llama_vocab_is_eog(chat_ctx->server_ctx.vocab, new_token);
+    if (runtime_params && runtime_params->ignore_eos_set) {
+      should_stop_eos = should_stop_eos && !runtime_params->ignore_eos;
+    }
+    
+    if (should_stop_eos) {
+      WASI_NN_LOG_DEBUG(chat_ctx, "Generation stopped at EOS token");
+      break;
+    }
+
+    // Convert token to text
+    char buf[256];
+    int n = llama_token_to_piece(chat_ctx->server_ctx.vocab, new_token, buf, sizeof(buf),
+                                 0, true);
+    if (n > 0)
+    {
+      response.append(buf, n);
+    }
+
+    // Check for stop sequences if provided
+    if (runtime_params && runtime_params->stop_sequences_set) {
+      for (const auto& stop_seq : runtime_params->stop_sequences) {
+        if (response.find(stop_seq) != std::string::npos) {
+          WASI_NN_LOG_DEBUG(chat_ctx, "Generation stopped by stop sequence: %s", stop_seq.c_str());
+          // Remove the stop sequence from the response
+          size_t pos = response.find(stop_seq);
+          if (pos != std::string::npos) {
+            response = response.substr(0, pos);
+          }
+          goto generation_complete;
+        }
+      }
+    }
+
+    // Prepare next batch
+    batch = llama_batch_get_one(&new_token, 1);
+    if (llama_decode(chat_ctx->server_ctx.ctx, batch))
+    {
+      NN_ERR_PRINTF("Failed to decode generated token");
+      break;
+    }
+  }
+
+generation_complete:
+  // Restore original antiprompt if we modified it
+  if (runtime_params && runtime_params->stop_sequences_set) {
+    chat_ctx->server_ctx.params_base.antiprompt = original_antiprompt;
+  }
+
+  // Add assistant response to chat history
+  chat_add_and_format("assistant", response);
+
+  return response;
+}
+
 __attribute__((visibility("default"))) wasi_nn_error
 run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
               tensor *input_tensor, tensor_data output_tensor,
-              uint32_t *output_tensor_size)
+              uint32_t *output_tensor_size,
+              const char *runtime_config, uint32_t config_len)
 {
   LlamaChatContext *chat_ctx = (LlamaChatContext *)ctx;
   if (!chat_ctx || !chat_ctx->server_ctx.ctx)
@@ -2213,18 +2795,34 @@ run_inference(void *ctx, graph_execution_context exec_ctx, uint32_t index,
 
   try
   {
-    std::string response =
-        run_inference_for_session(chat_ctx, exec_ctx, prompt_text);
+    // Parse runtime parameters if provided
+    wasi_nn_runtime_params runtime_params;
+    bool params_valid = true;
+    
+    if (runtime_config && config_len > 0) {
+      params_valid = parse_runtime_params(runtime_config, config_len, runtime_params, chat_ctx);
+      if (!params_valid) {
+        WASI_NN_LOG_ERROR(chat_ctx, "Failed to parse runtime configuration, using defaults");
+        // Continue with default parameters rather than failing
+      } else {
+        WASI_NN_LOG_INFO(chat_ctx, "Runtime configuration applied successfully");
+      }
+    }
+
+    // Run inference with enhanced function
+    std::string response = run_inference_for_session_with_params(
+        chat_ctx, exec_ctx, prompt_text, 
+        (params_valid && (runtime_config && config_len > 0)) ? &runtime_params : nullptr);
 
     *output_tensor_size = response.size() + 1;
     copy_string_to_tensor_data(output_tensor, *output_tensor_size, response);
 
-    NN_DBG_PRINTF("Generated response: %s", response.c_str());
+    WASI_NN_LOG_DEBUG(chat_ctx, "Generated response: %s", response.c_str());
     return success;
   }
   catch (const std::exception &e)
   {
-    NN_ERR_PRINTF("Inference failed: %s", e.what());
+    WASI_NN_LOG_ERROR(chat_ctx, "Inference failed: %s", e.what());
     return runtime_error;
   }
 }
