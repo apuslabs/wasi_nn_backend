@@ -1083,8 +1083,8 @@ static bool parse_runtime_params(const char *config_json, uint32_t config_len,
   // Parse generation control parameters
   runtime_params.max_tokens = cjson_get_value(root, "max_tokens", runtime_params.max_tokens);
   runtime_params.max_tokens = cjson_get_value(root, "n_predict", runtime_params.max_tokens); // Alternative name
-  runtime_params.seed = cjson_get_value(root, "seed", runtime_params.seed);
-  
+  runtime_params.seed = cjson_get_value(root, "seed", 1234); // Default seed
+
   // Parse ignore_eos with explicit flag
   cJSON *ignore_eos_item = cJSON_GetObjectItem(root, "ignore_eos");
   if (cJSON_IsBool(ignore_eos_item)) {
@@ -1428,7 +1428,7 @@ static void parse_config_to_params(const char *config_json,
   params.sampling.penalty_present = 0.0f;
   params.sampling.penalty_last_n = -1;  // Will be auto-adjusted
   params.sampling.ignore_eos = false;
-  params.sampling.seed = LLAMA_DEFAULT_SEED;
+  params.sampling.seed = 1234; // Default seed for reproducibility
   params.sampling.n_probs = 0;
   params.sampling.min_keep = 1;
 
