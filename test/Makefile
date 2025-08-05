@@ -1,27 +1,48 @@
-# Makefile for WASI-NN Backend Test Suite
+# Makefile for WASI-NN Backend Test Suite (Modular)
 # Usage: make test && ./main
 
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -g -O2
 LDFLAGS = -ldl -lpthread
 
-# Source files
-SOURCES = main.c
-TARGET = main
+# Modular source files
+COMMON_SOURCES = test_common.c
+TEST_SOURCES = test_basic.c test_inference.c test_session.c test_logging.c test_model.c test_stopping.c test_error.c
+MAIN_SOURCE = main.c
+ALL_SOURCES = $(COMMON_SOURCES) $(TEST_SOURCES) $(MAIN_SOURCE)
 
-# Build target
-$(TARGET): $(SOURCES)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SOURCES) $(LDFLAGS)
+# Targets
+TARGET = main
+TARGET_ORIGINAL = main_original
+
+# Default target uses modular architecture
+$(TARGET): $(ALL_SOURCES)
+	$(CC) $(CFLAGS) -o $(TARGET) $(ALL_SOURCES) $(LDFLAGS)
+
+# Original monolithic version (backup)
+$(TARGET_ORIGINAL): main.c
+	$(CC) $(CFLAGS) -o $(TARGET_ORIGINAL) main.c $(LDFLAGS)
 
 # Test target
 test: $(TARGET)
-	@echo "✅ Test executable built successfully"
+	@echo "✅ Modular test executable built successfully"
 	@echo "Run with: ./$(TARGET)"
+
+# Test original version
+test-original: $(TARGET_ORIGINAL)
+	@echo "✅ Original test executable built successfully"
+	@echo "Run with: ./$(TARGET_ORIGINAL)"
+
+# Test both versions
+test-all: $(TARGET) $(TARGET_ORIGINAL)
+	@echo "✅ Both test executables built successfully"
+	@echo "Run modular version: ./$(TARGET)"
+	@echo "Run original version: ./$(TARGET_ORIGINAL)"
 
 # Clean target
 clean:
-	rm -f $(TARGET)
-	@echo "✅ Cleaned test executable"
+	rm -f $(TARGET) $(TARGET_ORIGINAL) *.o
+	@echo "✅ Cleaned all test executables and object files"
 
 # Install target (ensure backend library exists)
 install:
@@ -35,6 +56,12 @@ install:
 
 # Full build and test
 all: install test
-	@echo "✅ Ready to run tests with: ./$(TARGET)"
+	@echo "✅ Ready to run modular tests with: ./$(TARGET)"
 
-.PHONY: test clean install all
+# Build all versions
+all-versions: install test-all
+	@echo "✅ Ready to run tests:"
+	@echo "  Modular: ./$(TARGET)"
+	@echo "  Original: ./$(TARGET_ORIGINAL)"
+
+.PHONY: test test-original test-all clean install all all-versions
