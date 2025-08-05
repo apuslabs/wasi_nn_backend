@@ -2347,6 +2347,9 @@ static void auto_cleanup_sessions(LlamaChatContext *chat_ctx)
       NN_INFO_PRINTF("Auto-cleanup: removing idle session %d (idle for %lldms)",
                      it->first, (long long)idle_time);
       it = chat_ctx->sessions.erase(it);
+      if (chat_ctx->active_sessions > 0) {
+        chat_ctx->active_sessions--;
+      }
     }
     else
     {
@@ -2380,6 +2383,9 @@ static void auto_cleanup_sessions(LlamaChatContext *chat_ctx)
       NN_INFO_PRINTF("Auto-cleanup: removing session %d (max sessions reached)",
                      exec_ctx_id);
       chat_ctx->sessions.erase(exec_ctx_id);
+      if (chat_ctx->active_sessions > 0) {
+        chat_ctx->active_sessions--;
+      }
     }
   }
 }
@@ -2417,16 +2423,15 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context_with
     }
   }
 
-  // Check concurrency limit
+  // Auto-cleanup on entry to free up space before checking concurrency limits
+  auto_cleanup_sessions(chat_ctx);
+
   if (chat_ctx->active_sessions + 1 > chat_ctx->max_concurrent)
   {
-    NN_ERR_PRINTF("Concurrency limit reached: %d active sessions, max allowed: %d",
+    NN_ERR_PRINTF("Unable to create new session after cleanup. Current: %d, Max: %d", 
                   chat_ctx->active_sessions, chat_ctx->max_concurrent);
     return runtime_error;
   }
-
-  // Auto-cleanup on entry
-  auto_cleanup_sessions(chat_ctx);
 
   // Initialize sampler if not already done (from main.cpp)
   // Setup threadpools if not already done
