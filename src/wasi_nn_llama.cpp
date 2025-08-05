@@ -171,9 +171,7 @@ struct LlamaChatContext
   bool auto_cleanup_enabled;
 
   // Enhanced concurrency and task management (Phase 4.2)
-  uint32_t max_concurrent;
   uint32_t queue_size;
-  uint32_t active_sessions; // Track active sessions
   
   // Advanced task queue system
   std::shared_ptr<wasi_nn_task_queue> task_queue;
@@ -240,7 +238,7 @@ struct LlamaChatContext
   LlamaChatContext()
       : next_exec_ctx_id(1),
         max_sessions(100), idle_timeout_ms(300000), auto_cleanup_enabled(true),
-        max_concurrent(8), queue_size(50), active_sessions(0),
+        queue_size(50),
         context_shifting_enabled(true), cache_strategy("lru"), max_cache_tokens(10000),
         n_keep_tokens(256), n_discard_tokens(0), memory_pressure_threshold(0.85f),
         enable_partial_cache_deletion(true), enable_token_cache_reuse(true),
@@ -508,7 +506,6 @@ static wasi_nn_error safe_model_switch(LlamaChatContext *chat_ctx, const char *f
     // Step 9: Clear all sessions (context will be lost)
     chat_ctx->sessions.clear();
     chat_ctx->next_exec_ctx_id = 1;
-    chat_ctx->active_sessions = 0;
     
     WASI_NN_LOG_INFO(chat_ctx, "Model switch completed successfully");
     WASI_NN_LOG_INFO(chat_ctx, "Model info: name=%s, arch=%s, vocab_size=%ld, ctx_len=%ld", 
@@ -1915,19 +1912,6 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
         // Boolean settings
         chat_ctx->auto_cleanup_enabled = cjson_get_value(config_obj, "auto_cleanup", chat_ctx->auto_cleanup_enabled);
 
-        // Concurrency settings with validation
-        uint32_t max_concurrent = cjson_get_value(config_obj, "max_concurrent", chat_ctx->max_concurrent);
-        if (max_concurrent > 0 && max_concurrent <= 256)  // Reasonable range
-        {
-          chat_ctx->max_concurrent = max_concurrent;
-          WASI_NN_LOG_INFO(chat_ctx, "Max concurrent set to: %u", max_concurrent);
-        }
-        else if (max_concurrent != chat_ctx->max_concurrent)
-        {
-          WASI_NN_LOG_WARN(chat_ctx, "Invalid max_concurrent (%u), must be between 1-256, using default: %u", 
-                           max_concurrent, chat_ctx->max_concurrent);
-        }
-
         // Queue size with validation
         uint32_t queue_size = cjson_get_value(config_obj, "queue_size", chat_ctx->queue_size);
         if (queue_size > 0 && queue_size <= 10000)  // Reasonable range
@@ -2194,8 +2178,8 @@ init_backend_with_config(void **ctx, const char *config, uint32_t config_len)
       chat_ctx->max_sessions, chat_ctx->idle_timeout_ms,
       chat_ctx->auto_cleanup_enabled ? "true" : "false");
   WASI_NN_LOG_INFO(chat_ctx,
-      "Concurrency config: max_concurrent=%d, queue_size=%d",
-      chat_ctx->max_concurrent, chat_ctx->queue_size);
+      "Queue config: queue_size=%d",
+      chat_ctx->queue_size);
   WASI_NN_LOG_INFO(chat_ctx,
       "Task Queue config: timeout=%dms, priority_scheduling=%s, fair_scheduling=%s",
       chat_ctx->default_task_timeout_ms,
@@ -2347,9 +2331,6 @@ static void auto_cleanup_sessions(LlamaChatContext *chat_ctx)
       NN_INFO_PRINTF("Auto-cleanup: removing idle session %d (idle for %lldms)",
                      it->first, (long long)idle_time);
       it = chat_ctx->sessions.erase(it);
-      if (chat_ctx->active_sessions > 0) {
-        chat_ctx->active_sessions--;
-      }
     }
     else
     {
@@ -2383,9 +2364,6 @@ static void auto_cleanup_sessions(LlamaChatContext *chat_ctx)
       NN_INFO_PRINTF("Auto-cleanup: removing session %d (max sessions reached)",
                      exec_ctx_id);
       chat_ctx->sessions.erase(exec_ctx_id);
-      if (chat_ctx->active_sessions > 0) {
-        chat_ctx->active_sessions--;
-      }
     }
   }
 }
@@ -2423,13 +2401,14 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context_with
     }
   }
 
-  // Auto-cleanup on entry to free up space before checking concurrency limits
+  // Auto-cleanup on entry to free up space before checking session limits
   auto_cleanup_sessions(chat_ctx);
 
-  if (chat_ctx->active_sessions + 1 > chat_ctx->max_concurrent)
+  // Check if we can create a new session (use sessions.size() vs max_sessions)
+  if (chat_ctx->sessions.size() >= chat_ctx->max_sessions)
   {
-    NN_ERR_PRINTF("Unable to create new session after cleanup. Current: %d, Max: %d", 
-                  chat_ctx->active_sessions, chat_ctx->max_concurrent);
+    NN_ERR_PRINTF("Unable to create new session after cleanup. Current: %zu, Max: %d", 
+                  chat_ctx->sessions.size(), chat_ctx->max_sessions);
     return runtime_error;
   }
 
@@ -2463,13 +2442,12 @@ __attribute__((visibility("default"))) wasi_nn_error init_execution_context_with
   session_info.last_activity = std::chrono::steady_clock::now();
 
   chat_ctx->sessions[new_exec_ctx] = std::move(session_info);
-  chat_ctx->active_sessions++; // Increment active sessions counter
 
   *exec_ctx = new_exec_ctx;
 
   NN_INFO_PRINTF(
-      "Execution context %d initialized for session '%s'. Active sessions: %d, Max concurrent: %d",
-      new_exec_ctx, session_id, chat_ctx->active_sessions, chat_ctx->max_concurrent);
+      "Execution context %d initialized for session '%s'. Total sessions: %zu, Max sessions: %d",
+      new_exec_ctx, session_id, chat_ctx->sessions.size(), chat_ctx->max_sessions);
 
   return success;
 }
@@ -2491,13 +2469,9 @@ close_execution_context(void *ctx, graph_execution_context exec_ctx)
     auto_clear_kv_cache_session(chat_ctx, exec_ctx);
     
     chat_ctx->sessions.erase(it);
-    if (chat_ctx->active_sessions > 0)
-    {
-      chat_ctx->active_sessions--; // Decrement active sessions counter
-    }
     
     // Phase 4.3: Check if we should do global memory optimization after session close
-    if (chat_ctx->active_sessions == 0) {
+    if (chat_ctx->sessions.empty()) {
       // All sessions closed, good time for global cleanup
       auto_clear_all_kv_cache(chat_ctx);
     }
@@ -2939,40 +2913,7 @@ compute(void *ctx, graph_execution_context exec_ctx)
   if (session_it == chat_ctx->sessions.end())
     return invalid_argument;
 
-  // Check if we're at capacity - if so, queue the task
-  if (chat_ctx->active_sessions >= chat_ctx->max_concurrent)
-  {
-    if (!chat_ctx->task_queue)
-    {
-      NN_WARN_PRINTF("Task queue not initialized but needed for queuing");
-      return runtime_error;
-    }
-    
-    // Create a task for queuing
-    wasi_nn_task task;
-    task.exec_ctx = exec_ctx;
-    task.prompt = session_it->second.session_id; // Retrieved from set_input
-    task.timeout_ms = chat_ctx->default_task_timeout_ms;
-    task.timeout_at = task.created_at + std::chrono::milliseconds(task.timeout_ms);
-    task.is_queued = true;
-    
-    // Determine priority (for now, all tasks are normal priority)
-    // In a real implementation, this could be based on user settings or prompt analysis
-    task.priority = WASI_NN_PRIORITY_NORMAL;
-    
-    // Try to enqueue the task
-    if (!chat_ctx->task_queue->enqueue_task(std::move(task), chat_ctx))
-    {
-      NN_WARN_PRINTF("Failed to enqueue task for execution context %d - queue full", exec_ctx);
-      return runtime_error;
-    }
-    
-    NN_INFO_PRINTF("Task queued for execution context %d due to capacity limits (%d/%d active)", 
-                   exec_ctx, chat_ctx->active_sessions, chat_ctx->max_concurrent);
-    return success;
-  }
-  
-  // If we have capacity, process immediately
+  // For simplified version, process immediately without concurrency limits
   NN_INFO_PRINTF("Processing compute request immediately for execution context %d", exec_ctx);
   
   // Update last activity time
