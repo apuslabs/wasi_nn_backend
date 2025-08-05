@@ -6,10 +6,11 @@
 2. [Model Parameters](#model-parameters)
 3. [Sampling Parameters](#sampling-parameters)
 4. [Memory Management](#memory-management)
-5. [Logging Configuration](#logging-configuration)
-6. [Performance Tuning](#performance-tuning)
-7. [Advanced Features](#advanced-features)
-8. [Platform-Specific Settings](#platform-specific-settings)
+5. [Runtime Parameters](#runtime-parameters)
+6. [Logging Configuration](#logging-configuration)
+7. [Performance Tuning](#performance-tuning)
+8. [Advanced Features](#advanced-features)
+9. [Platform-Specific Settings](#platform-specific-settings)
 
 ## Configuration File Structure
 
@@ -21,6 +22,7 @@ The configuration is provided as JSON with the following top-level sections:
   "model": { /* Model loading and context settings */ },
   "sampling": { /* Text generation parameters */ },
   "stopping": { /* Generation stopping criteria */ },
+  "runtime": { /* Runtime parameter overrides */ },
   "memory": { /* Memory and cache management */ },
   "logging": { /* Logging and debugging */ },
   "performance": { /* Performance optimization */ },
@@ -305,6 +307,154 @@ Advanced memory management features for production deployments.
 }
 ```
 
+## Runtime Parameters
+
+Runtime parameters allow dynamic configuration of inference behavior without reloading the model or recreating the context. These parameters can be passed with each inference request to override the default sampling and generation settings.
+
+### Core Runtime Sampling
+
+These parameters control the randomness and creativity of text generation at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `temperature` | float | -1.0 | -1.0 or 0.0-2.0 | Text generation randomness (-1 = use default) | 文本生成随机性（-1 = 使用默认值） |
+| `temp` | float | -1.0 | -1.0 or 0.0-2.0 | Alias for temperature | temperature 的别名 |
+| `top_p` | float | -1.0 | -1.0 or 0.0-1.0 | Nucleus sampling threshold (-1 = use default) | 核采样阈值（-1 = 使用默认值） |
+| `top_k` | integer | -1 | -1 or 1-200 | Top-k sampling limit (-1 = use default) | Top-k 采样限制（-1 = 使用默认值） |
+| `min_p` | float | -1.0 | -1.0 or 0.0-1.0 | Minimum probability threshold (-1 = use default) | 最小概率阈值（-1 = 使用默认值） |
+| `typical_p` | float | -1.0 | -1.0 or 0.0-1.0 | Typical sampling parameter (-1 = use default) | 典型采样参数（-1 = 使用默认值） |
+
+### Runtime Penalty Parameters
+
+Control repetition and encourage diversity in generated text at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `repeat_penalty` | float | -1.0 | -1.0 or 0.0-2.0 | Penalty for repeating tokens (-1 = use default) | 重复令牌的惩罚（-1 = 使用默认值） |
+| `frequency_penalty` | float | -1.0 | -1.0 or -2.0-2.0 | Penalty based on token frequency (-1 = use default) | 基于令牌频率的惩罚（-1 = 使用默认值） |
+| `presence_penalty` | float | -1.0 | -1.0 or -2.0-2.0 | Penalty for token presence (-1 = use default) | 令牌存在的惩罚（-1 = 使用默认值） |
+| `penalty_last_n` | integer | -1 | -1 or 1-2048 | Tokens to consider for penalty (-1 = use default) | 考虑惩罚的令牌数（-1 = 使用默认值） |
+| `repeat_last_n` | integer | -1 | -1 or 1-2048 | Alias for penalty_last_n | penalty_last_n 的别名 |
+
+### Runtime Generation Control
+
+Control the length and behavior of text generation at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `max_tokens` | integer | -1 | -1 or 1-4096 | Maximum tokens to generate (-1 = use default) | 生成的最大令牌数（-1 = 使用默认值） |
+| `n_predict` | integer | -1 | -1 or 1-4096 | Alias for max_tokens | max_tokens 的别名 |
+| `seed` | integer | -1 | -1 or 0-2³¹ | Random seed (-1 = use default/random) | 随机种子（-1 = 使用默认值/随机） |
+| `ignore_eos` | boolean | false | - | Ignore end-of-sequence tokens | 忽略序列结束令牌 |
+
+### Runtime DRY Sampling Parameters
+
+Advanced repetition suppression that can be adjusted at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `dry_multiplier` | float | -1.0 | -1.0 or 0.0-5.0 | DRY sampling strength (-1 = use default) | DRY 采样强度（-1 = 使用默认值） |
+| `dry_base` | float | -1.0 | -1.0 or 1.0-4.0 | DRY base value (-1 = use default) | DRY 基础值（-1 = 使用默认值） |
+| `dry_allowed_length` | integer | -1 | -1 or 1-20 | Minimum sequence length for DRY (-1 = use default) | DRY 的最小序列长度（-1 = 使用默认值） |
+| `dry_penalty_last_n` | integer | -1 | -1 or 1-2048 | Tokens to consider for DRY (-1 = use default) | DRY 考虑的令牌数（-1 = 使用默认值） |
+
+### Runtime Dynamic Temperature
+
+Dynamic temperature adjustment that can be configured at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `dynatemp_range` | float | -1.0 | -1.0 or 0.0-2.0 | Dynamic temperature range (-1 = use default) | 动态温度范围（-1 = 使用默认值） |
+| `dynatemp_exponent` | float | -1.0 | -1.0 or 0.1-5.0 | Dynamic temperature exponent (-1 = use default) | 动态温度指数（-1 = 使用默认值） |
+
+### Runtime Mirostat Parameters
+
+Mirostat sampling that can be adjusted at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `mirostat` | integer | -1 | -1 or 0-2 | Mirostat algorithm version (-1 = use default) | Mirostat 算法版本（-1 = 使用默认值） |
+| `mirostat_tau` | float | -1.0 | -1.0 or 0.1-10.0 | Target entropy (-1 = use default) | 目标熵（-1 = 使用默认值） |
+| `mirostat_eta` | float | -1.0 | -1.0 or 0.001-1.0 | Learning rate for entropy control (-1 = use default) | 熵控制的学习率（-1 = 使用默认值） |
+
+### Runtime Other Parameters
+
+Additional parameters that can be set at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `n_probs` | integer | -1 | -1 or 0-100 | Number of top probabilities to return (-1 = use default) | 返回的顶部概率数量（-1 = 使用默认值） |
+| `logprobs` | integer | -1 | -1 or 0-100 | Alias for n_probs (OpenAI compatibility) | n_probs 的别名（OpenAI 兼容） |
+| `min_keep` | integer | -1 | -1 or 1-100 | Minimum tokens to keep in sampling (-1 = use default) | 采样中保留的最小令牌数（-1 = 使用默认值） |
+
+### Runtime Stop Sequences and Grammar
+
+Control generation stopping and output structure at runtime.
+
+| Parameter | Type | Default | Range | Description (EN) | Description (CN) |
+|-----------|------|---------|--------|------------------|------------------|
+| `stop` | array | [] | - | Stop sequences (strings that end generation) | 停止序列（结束生成的字符串） |
+| `grammar` | string | "" | - | GBNF grammar for structured output | 用于结构化输出的 GBNF 语法 |
+
+**Important Notes:**
+- Runtime parameters with value `-1` will use the default configuration values
+- Runtime parameters override the default sampling configuration for that specific inference request
+- Boolean parameters like `ignore_eos` use their explicit values when set
+- Arrays like `stop` sequences completely replace the default when provided
+
+**Example Runtime Configuration:**
+```json
+{
+  "runtime": {
+    "temperature": 0.8,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_tokens": 1024,
+    "repeat_penalty": 1.1,
+    "stop": ["Human:", "Assistant:", "</s>"],
+    "seed": 42,
+    "ignore_eos": false
+  }
+}
+```
+
+**Minimal Runtime Configuration:**
+```json
+{
+  "runtime": {
+    "temperature": 0.7,
+    "max_tokens": 512
+  }
+}
+```
+
+**Creative Writing Configuration:**
+```json
+{
+  "runtime": {
+    "temperature": 1.2,
+    "top_p": 0.95,
+    "top_k": 50,
+    "repeat_penalty": 1.05,
+    "dry_multiplier": 0.8,
+    "max_tokens": 2048
+  }
+}
+```
+
+**Deterministic Output Configuration:**
+```json
+{
+  "runtime": {
+    "temperature": 0.1,
+    "top_p": 0.1,
+    "top_k": 1,
+    "seed": 42,
+    "max_tokens": 256
+  }
+}
+```
+
 ## Logging Configuration
 
 Comprehensive logging system for debugging and monitoring.
@@ -468,6 +618,15 @@ High-throughput server configuration for production environments.
     "memory_pressure_threshold": 0.85,
     "max_memory_mb": 32768
   },
+  "runtime": {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_tokens": 1024,
+    "repeat_penalty": 1.1,
+    "dry_multiplier": 0.8,
+    "stop": ["Human:", "Assistant:", "</s>"]
+  },
   "logging": {
     "level": "info",
     "timestamps": true,
@@ -503,6 +662,12 @@ Configuration optimized for development and testing.
     "top_p": 0.95,
     "seed": 42
   },
+  "runtime": {
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "max_tokens": 512,
+    "seed": 42
+  },
   "logging": {
     "level": "debug",
     "enable_debug": true,
@@ -533,6 +698,11 @@ Configuration for systems with limited resources.
     "max_cache_tokens": 10000,
     "memory_pressure_threshold": 0.9,
     "max_memory_mb": 2048
+  },
+  "runtime": {
+    "temperature": 0.7,
+    "max_tokens": 256,
+    "top_p": 0.9
   }
 }
 ```
@@ -546,11 +716,14 @@ The backend validates configuration parameters and will use defaults or report e
 - `penalty_last_n = -1` → automatically set to `n_ctx`
 - `dry_penalty_last_n = -1` → automatically set to `n_ctx`
 - Queue thresholds adjusted to not exceed `queue_size`
+- Runtime parameters with `-1` values → use configuration defaults
 
 ### Error Conditions
 
 - `temperature < 0` or `temperature > 2.0` → Warning and reset to default
 - `n_ctx < 128` → Error, minimum context size required
 - `max_memory_mb < 64` (unless 0) → Warning and reset to default
+- Runtime `top_p` outside [0.0, 1.0] → Clamped to valid range
+- Runtime `repeat_penalty < 0.1` → Warning and reset to 0.1
 
 This comprehensive parameter reference provides detailed information for fine-tuning the WASI-NN backend for your specific use case, whether it's a high-performance production server or a resource-constrained development environment.
